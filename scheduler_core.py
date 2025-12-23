@@ -5,7 +5,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any
 
 
 # =========================
@@ -34,11 +34,6 @@ class Event:
 
 @dataclass
 class IncomingEvent:
-    """
-    Represents what you actually receive "in real time".
-    receive_time = when the engine receives the message
-    event = contains the original timestamp (when it happened) + type/value
-    """
     receive_time: datetime
     event: Event
     source: str = "simulation"
@@ -133,79 +128,72 @@ def parse_urgent_payload(payload: str, created_at: datetime) -> WorkOrder:
 
 class SchedulerEngine:
     """
-    Event-driven scheduler with:
-    - minute-by-minute execution
-    - hourly reporting support
-    - late event policy (APPLY_NOW vs IGNORE)
-    - event journal
+    Key change (Correction B):
+    - Breakdown events trigger replanning ONLY if downtime duration >= 30 min.
     """
 
     def __init__(self, work_orders: List[WorkOrder], setup: SetupMatrix):
         self._lock = threading.Lock()
         self.setup = setup
 
-        # Orders not yet injected
         self._pool: List[WorkOrder] = list(work_orders)
 
-        # Machine state
+        # machine time/state
         self.now: datetime = min((o.created_at for o in self._pool), default=datetime.now())
         self.is_running: bool = False
         self.is_down: bool = False
         self.speed_factor: float = 1.0
         self.current_format: Optional[str] = None
 
-        # Current job
+        # current job
         self.current_job: Optional[WorkOrder] = None
         self.remaining_setup_min: int = 0
         self.remaining_work_nominal_min: int = 0
-
-        # Queue
-        self.queue: List[WorkOrder] = []
         self._work_acc: float = 0.0
 
-        # Policies
-        self.max_event_lateness_min: int = 120  # if too old, ignore
-        self.late_policy: str = "APPLY_NOW"     # APPLY_NOW or IGNORE
+        # queue
+        self.queue: List[WorkOrder] = []
 
-        # Replan policy
-        self.replan_threshold_total_late_min: int = 30
+        # late events policy
+        self.max_event_lateness_min: int = 120
+        self.late_policy: str = "APPLY_NOW"  # APPLY_NOW or IGNORE
 
-        # Journal
+        # replanning policy
+        self.replan_threshold_total_late_min: int = 30  # KPI-based (still used for non-breakdown)
+        self.breakdown_replan_threshold_min: int = 30   # NEW: downtime duration threshold
+
+        # breakdown tracking
+        self._down_start_time: Optional[datetime] = None
+        self._down_reason: str = ""
+        self._last_breakdown_duration_min: int = 0
+
+        # journal
         self._event_log: List[Dict[str, Any]] = []
 
-        # KPI counters (for hourly reports)
+        # KPI counters
         self._downtime_min: int = 0
         self._stopped_min: int = 0
         self._idle_min: int = 0
         self._producing_min: int = 0
-        self._completed: List[Dict[str, Any]] = []  # {of_id, finished_at}
+        self._completed: List[Dict[str, Any]] = []
 
-        # Init
         self._refresh_queue_from_pool()
-    
-        # Ajoute ça dans class SchedulerEngine
 
+    # ----- deepcopy helper (fix cannot pickle lock) -----
     def __getstate__(self):
-        """
-        Permet à deepcopy (pickle) de fonctionner : on retire le lock du state.
-        """
         state = self.__dict__.copy()
         state.pop("_lock", None)
         return state
 
     def __setstate__(self, state):
-        """
-        Quand l'objet est reconstruit, on remet un nouveau lock.
-        """
         self.__dict__.update(state)
         self._lock = threading.Lock()
 
-    # ---------- Cloning (for simulation without touching live engine) ----------
     def clone(self) -> "SchedulerEngine":
         with self._lock:
             return copy.deepcopy(self)
 
-    # ---------- Public API ----------
+    # ---------- Public ----------
     def set_time(self, new_now: datetime) -> Dict[str, str]:
         with self._lock:
             self._advance_to(new_now)
@@ -214,25 +202,15 @@ class SchedulerEngine:
             return {"status": "ok", "now": self.now.isoformat(timespec="minutes")}
 
     def handle_event(self, ev: Event, source: str = "events") -> Dict[str, Any]:
-        """
-        Handles an event at current engine time, considering late policy.
-        The engine always advances to ev.timestamp IF it is in the future.
-        If ev.timestamp is in the past (late event), behavior depends on late_policy.
-        """
         with self._lock:
-            return self._handle_event_locked(ev=ev, source=source)
+            return self._handle_event_locked(ev=ev, source=source, received_at=self.now)
 
     def handle_incoming(self, inc: IncomingEvent) -> Dict[str, Any]:
-        """
-        Realistic mode: engine receives at receive_time, but event has its own timestamp (when it happened).
-        """
         with self._lock:
-            # First, engine advances to the time it receives the event (real-time progression).
+            # advance to receive time first (realistic)
             self._advance_to(inc.receive_time)
             self._refresh_queue_from_pool()
             self._start_next_if_possible()
-
-            # Then process the event, which might be late compared to engine.now
             return self._handle_event_locked(ev=inc.event, source=inc.source, received_at=inc.receive_time)
 
     def get_state(self) -> Dict[str, Any]:
@@ -253,6 +231,12 @@ class SchedulerEngine:
                 "remaining_work_nominal_min": self.remaining_work_nominal_min,
                 "queue_size": len(self.queue),
                 "pool_remaining": len(self._pool),
+                "breakdown": {
+                    "down_start_time": None if self._down_start_time is None else self._down_start_time.isoformat(timespec="minutes"),
+                    "down_reason": self._down_reason,
+                    "last_breakdown_duration_min": self._last_breakdown_duration_min,
+                    "replan_threshold_min": self.breakdown_replan_threshold_min
+                },
                 "kpi": {
                     "downtime_min": self._downtime_min,
                     "stopped_min": self._stopped_min,
@@ -266,168 +250,8 @@ class SchedulerEngine:
         with self._lock:
             return self._event_log[-max(1, limit):]
 
-    def get_plan_preview(self, limit: int = 30) -> List[PlanRow]:
-        with self._lock:
-            sim_now = self.now
-            sim_fmt = self.current_format
-            sim_speed = self.speed_factor
-
-            note_prefix = ""
-            if self.is_down:
-                note_prefix += "DOWN; "
-            if not self.is_running:
-                note_prefix += "STOPPED; "
-
-            rows: List[PlanRow] = []
-
-            if self.current_job is not None:
-                setup_left = self.remaining_setup_min
-                work_left_nom = self.remaining_work_nominal_min
-                real_work_min = int(work_left_nom / max(sim_speed, 1e-6))
-                start = sim_now
-                end = sim_now + timedelta(minutes=setup_left + real_work_min)
-                rows.append(PlanRow(
-                    of_id=self.current_job.of_id,
-                    format=self.current_job.format,
-                    start=start,
-                    end=end,
-                    setup_min=setup_left,
-                    work_nominal_min=work_left_nom,
-                    note=note_prefix + "in_progress"
-                ))
-                sim_now = end
-                sim_fmt = self.current_job.format
-
-            for wo in self.queue[:max(0, limit - len(rows))]:
-                setup_min = self.setup.get(sim_fmt, wo.format)
-                real_work_min = int(wo.nominal_duration_min / max(sim_speed, 1e-6))
-                start = sim_now
-                end = sim_now + timedelta(minutes=setup_min + real_work_min)
-                rows.append(PlanRow(
-                    of_id=wo.of_id,
-                    format=wo.format,
-                    start=start,
-                    end=end,
-                    setup_min=setup_min,
-                    work_nominal_min=wo.nominal_duration_min,
-                    note=note_prefix + "queued"
-                ))
-                sim_now = end
-                sim_fmt = wo.format
-
-            return rows
-
-    # ---------- Hourly report (for “bilan toutes les 1h”) ----------
-    def get_hourly_report(self) -> Dict[str, Any]:
-        """
-        Snapshot KPIs at current time.
-        """
-        with self._lock:
-            total_late = self._kpi_total_lateness(self.queue)
-
-            return {
-                "time": self.now.isoformat(timespec="minutes"),
-                "machine": {
-                    "is_running": self.is_running,
-                    "is_down": self.is_down,
-                    "speed_factor": self.speed_factor,
-                    "current_format": self.current_format,
-                    "current_job_id": None if self.current_job is None else self.current_job.of_id,
-                },
-                "queue_size": len(self.queue),
-                "completed_count": len(self._completed),
-                "total_lateness_min_est": total_late,
-                "counters_min": {
-                    "downtime": self._downtime_min,
-                    "stopped": self._stopped_min,
-                    "idle": self._idle_min,
-                    "producing": self._producing_min,
-                }
-            }
-
-    # ---------- Simulation of a whole day with hourly reports ----------
-    def simulate_day(self,
-                     day_start: datetime,
-                     day_end: datetime,
-                     incoming_events: List[IncomingEvent],
-                     report_every_min: int = 60) -> Dict[str, Any]:
-        """
-        Simulates [day_start, day_end] using incoming_events (received over time),
-        produces a report every hour.
-
-        Key: incoming_events are sorted by receive_time (when the engine gets them).
-        Their embedded event.timestamp may be earlier than receive_time (late events).
-        """
-        # Work on a clone to not break live engine
-        sim = self.clone()
-
-        # Move to day_start
-        sim.set_time(day_start)
-
-        # sort incoming events by receive_time
-        incoming_events = sorted(incoming_events, key=lambda x: x.receive_time)
-
-        idx = 0
-        reports: List[Dict[str, Any]] = []
-        late_events_count = 0
-        ignored_events_count = 0
-        applied_events_count = 0
-
-        t = day_start
-        next_report = day_start
-
-        while t <= day_end:
-            # process events that are received up to current t
-            while idx < len(incoming_events) and incoming_events[idx].receive_time <= t:
-                res = sim.handle_incoming(incoming_events[idx])
-                if res.get("late_applied"):
-                    late_events_count += 1
-                if res.get("status") == "ignored":
-                    ignored_events_count += 1
-                if res.get("status") == "ok":
-                    applied_events_count += 1
-                idx += 1
-
-            # advance time by 1 minute (real-time simulation)
-            sim._advance_to(t)
-
-            # hourly report
-            if t >= next_report:
-                reports.append(sim.get_hourly_report())
-                next_report = next_report + timedelta(minutes=report_every_min)
-
-            t = t + timedelta(minutes=1)
-
-        return {
-            "day_start": day_start.isoformat(timespec="minutes"),
-            "day_end": day_end.isoformat(timespec="minutes"),
-            "late_policy": sim.late_policy,
-            "max_event_lateness_min": sim.max_event_lateness_min,
-            "stats": {
-                "events_received": len(incoming_events),
-                "events_applied": applied_events_count,
-                "events_ignored": ignored_events_count,
-                "late_events_applied": late_events_count,
-            },
-            "reports": reports,
-            "last_state": sim.get_state(),
-            "event_log_tail": sim.get_event_log(limit=50),
-        }
-
-    # =========================
-    # Internal mechanics
-    # =========================
-
-    def _handle_event_locked(self,
-                            ev: Event,
-                            source: str,
-                            received_at: Optional[datetime] = None) -> Dict[str, Any]:
-        """
-        Internal version of event handling. Assumes lock is held.
-        """
-        if received_at is None:
-            received_at = self.now
-
+    # ---------- Internal ----------
+    def _handle_event_locked(self, ev: Event, source: str, received_at: datetime) -> Dict[str, Any]:
         log_entry = {
             "received_at": received_at.isoformat(timespec="minutes"),
             "source": source,
@@ -439,15 +263,17 @@ class SchedulerEngine:
             "reason": "",
             "late_applied": False,
             "replanned": False,
+            "replan_reason": "",
+            "breakdown_duration_min": None,
             "engine_now_after": "",
         }
 
-        # If event timestamp is in the future relative to engine: advance to it
+        # advance if event is in the future
         if ev.timestamp > self.now:
             self._advance_to(ev.timestamp)
             self._refresh_queue_from_pool()
 
-        # If event timestamp is in the past => late event
+        # late event handling
         if ev.timestamp < self.now:
             lateness = int((self.now - ev.timestamp).total_seconds() // 60)
 
@@ -465,22 +291,61 @@ class SchedulerEngine:
                 self._event_log.append(log_entry)
                 return log_entry
 
-            # APPLY_NOW: we accept but do NOT rewind time
             log_entry["late_applied"] = True
 
-        # Apply event now (either on-time or late APPLY_NOW)
-        self._apply_event(ev)
+        # apply event
+        # (also sets breakdown tracking fields)
+        breakdown_duration_min = self._apply_event(ev)
+        if breakdown_duration_min is not None:
+            log_entry["breakdown_duration_min"] = breakdown_duration_min
+
         self._refresh_queue_from_pool()
 
-        if self._is_critical(ev):
-            replanned = self._maybe_replan(reason=ev.type)
-            log_entry["replanned"] = replanned
+        # Decide replanning
+        replanned, why = self._should_and_maybe_replan(ev, breakdown_duration_min)
+        log_entry["replanned"] = replanned
+        log_entry["replan_reason"] = why
 
         self._start_next_if_possible()
         log_entry["engine_now_after"] = self.now.isoformat(timespec="minutes")
 
         self._event_log.append(log_entry)
         return log_entry
+
+    def _should_and_maybe_replan(self, ev: Event, breakdown_duration_min: Optional[int]) -> (bool, str):
+        """
+        New rule:
+        - For breakdowns: only if downtime duration >= breakdown_replan_threshold_min
+        - For urgent orders: always try
+        - For speed change: treat as critical (KPI based)
+        - For shift: no replan
+        """
+        t = ev.type.upper().strip()
+
+        # Breakdown logic (the core of correction B)
+        if t in {"BREAKDOWN_START", "BREAKDOWN_END"}:
+            # if we do not know duration yet (start), we don't replan
+            if breakdown_duration_min is None:
+                return (False, "breakdown_start_no_duration")
+
+            if breakdown_duration_min < self.breakdown_replan_threshold_min:
+                return (False, f"breakdown_duration<{self.breakdown_replan_threshold_min}min")
+
+            # downtime is big enough => replan
+            changed = self._maybe_replan(reason="BREAKDOWN_MAJOR")
+            return (changed, f"breakdown_duration>={self.breakdown_replan_threshold_min}min")
+
+        # urgent => always try
+        if t == "URGENT_ORDER":
+            changed = self._maybe_replan(reason="URGENT_ORDER")
+            return (changed, "urgent_order")
+
+        # speed change => KPI-based
+        if t == "SPEED_CHANGE":
+            changed = self._maybe_replan(reason="SPEED_CHANGE")
+            return (changed, "speed_change")
+
+        return (False, "not_critical")
 
     def _refresh_queue_from_pool(self):
         existing_ids = {wo.of_id for wo in self.queue}
@@ -517,24 +382,23 @@ class SchedulerEngine:
         elif not self.is_running:
             self._stopped_min += 1
         else:
-            # running
             if self.current_job is None:
                 self._idle_min += 1
             else:
                 self._producing_min += 1
 
-        # Cannot run => no progress
+        # no progress
         if self.is_down or (not self.is_running) or self.current_job is None:
             self.now += timedelta(minutes=1)
             return
 
-        # Setup
+        # setup
         if self.remaining_setup_min > 0:
             self.remaining_setup_min -= 1
             self.now += timedelta(minutes=1)
             return
 
-        # Work
+        # work
         self._work_acc += float(self.speed_factor)
         consume_nom = int(self._work_acc)
         if consume_nom > 0:
@@ -543,7 +407,7 @@ class SchedulerEngine:
 
         self.now += timedelta(minutes=1)
 
-        # Finished
+        # finish
         if self.remaining_setup_min == 0 and self.remaining_work_nominal_min == 0:
             finished_id = self.current_job.of_id
             self.current_format = self.current_job.format
@@ -551,35 +415,59 @@ class SchedulerEngine:
             self._work_acc = 0.0
             self._completed.append({"of_id": finished_id, "finished_at": self.now.isoformat(timespec="minutes")})
 
-    def _apply_event(self, ev: Event):
+    def _apply_event(self, ev: Event) -> Optional[int]:
+        """
+        Returns breakdown duration minutes only when BREAKDOWN_END occurs and we have a start.
+        Otherwise returns None.
+        """
         t = ev.type.upper().strip()
 
         if t == "SHIFT_START":
             self.is_running = True
+            return None
 
-        elif t == "SHIFT_STOP":
+        if t == "SHIFT_STOP":
             self.is_running = False
+            return None
 
-        elif t == "BREAKDOWN_START":
-            self.is_down = True
-
-        elif t == "BREAKDOWN_END":
-            # if we were down, this brings us up
-            self.is_down = False
-
-        elif t == "SPEED_CHANGE":
+        if t == "SPEED_CHANGE":
             try:
                 sf = float(ev.value)
                 if sf > 0:
                     self.speed_factor = sf
             except ValueError:
                 pass
+            return None
 
-        elif t == "URGENT_ORDER":
+        if t == "URGENT_ORDER":
             urgent = parse_urgent_payload(ev.value, created_at=self.now)
             self.queue.append(urgent)
+            self.queue.sort(key=lambda x: (x.due_date, -x.priority))
+            return None
 
-        self.queue.sort(key=lambda x: (x.due_date, -x.priority))
+        if t == "BREAKDOWN_START":
+            self.is_down = True
+            # Track start time ONLY when entering downtime
+            if self._down_start_time is None:
+                self._down_start_time = self.now
+                self._down_reason = ev.value or ""
+            return None
+
+        if t == "BREAKDOWN_END":
+            # end downtime
+            self.is_down = False
+            # compute duration if we know start
+            if self._down_start_time is not None:
+                duration = int((self.now - self._down_start_time).total_seconds() // 60)
+                self._last_breakdown_duration_min = max(0, duration)
+                # reset
+                self._down_start_time = None
+                self._down_reason = ""
+                return self._last_breakdown_duration_min
+            return 0
+
+        # unknown
+        return None
 
     def _start_next_if_possible(self):
         if self.current_job is not None:
@@ -596,9 +484,7 @@ class SchedulerEngine:
         self.remaining_work_nominal_min = wo.nominal_duration_min
         self._work_acc = 0.0
 
-    def _is_critical(self, ev: Event) -> bool:
-        return ev.type.upper() in {"BREAKDOWN_START", "BREAKDOWN_END", "URGENT_ORDER", "SPEED_CHANGE"}
-
+    # ---------- Replanning ----------
     def _maybe_replan(self, reason: str) -> bool:
         before = self._kpi_total_lateness(self.queue)
         candidate = self._replan_queue(self.queue)
@@ -655,7 +541,7 @@ class SchedulerEngine:
             sim_fmt = best.format
 
         return new_q
-    
+
     def _score(self, now: datetime, current_format: Optional[str], wo: WorkOrder) -> float:
         setup_min = self.setup.get(current_format, wo.format)
         real_work_min = int(wo.nominal_duration_min / max(self.speed_factor, 1e-6))
@@ -667,7 +553,91 @@ class SchedulerEngine:
         W_PRIO = 20.0
 
         return (W_LATE * late_min) + (W_SETUP * setup_min) - (W_PRIO * wo.priority)
-    
+
+    # ---------- Day simulation ----------
+    def simulate_day(self,
+                     day_start: datetime,
+                     day_end: datetime,
+                     incoming_events: List[IncomingEvent],
+                     report_every_min: int = 60) -> Dict[str, Any]:
+        sim = self.clone()
+        sim.set_time(day_start)
+
+        incoming_events = sorted(incoming_events, key=lambda x: x.receive_time)
+        idx = 0
+
+        reports: List[Dict[str, Any]] = []
+        next_report = day_start
+
+        stats = {
+            "events_received": len(incoming_events),
+            "events_applied": 0,
+            "events_ignored": 0,
+            "late_events_applied": 0,
+            "replans": 0,
+            "breakdown_replans": 0
+        }
+
+        t = day_start
+        while t <= day_end:
+            # process all incoming events up to time t
+            while idx < len(incoming_events) and incoming_events[idx].receive_time <= t:
+                res = sim.handle_incoming(incoming_events[idx])
+                if res.get("status") == "ignored":
+                    stats["events_ignored"] += 1
+                else:
+                    stats["events_applied"] += 1
+                if res.get("late_applied"):
+                    stats["late_events_applied"] += 1
+                if res.get("replanned"):
+                    stats["replans"] += 1
+                    if res.get("replan_reason", "").startswith("breakdown_duration"):
+                        stats["breakdown_replans"] += 1
+                idx += 1
+
+            # advance to current minute
+            sim._advance_to(t)
+
+            # hourly report
+            if t >= next_report:
+                reports.append(sim._hourly_report_snapshot())
+                next_report = next_report + timedelta(minutes=report_every_min)
+
+            t = t + timedelta(minutes=1)
+
+        return {
+            "day_start": day_start.isoformat(timespec="minutes"),
+            "day_end": day_end.isoformat(timespec="minutes"),
+            "late_policy": sim.late_policy,
+            "max_event_lateness_min": sim.max_event_lateness_min,
+            "breakdown_replan_threshold_min": sim.breakdown_replan_threshold_min,
+            "stats": stats,
+            "reports": reports,
+            "last_state": sim.get_state(),
+            "event_log_tail": sim.get_event_log(limit=50),
+        }
+
+    def _hourly_report_snapshot(self) -> Dict[str, Any]:
+        total_late = self._kpi_total_lateness(self.queue)
+        return {
+            "time": self.now.isoformat(timespec="minutes"),
+            "machine": {
+                "is_running": self.is_running,
+                "is_down": self.is_down,
+                "speed_factor": self.speed_factor,
+                "current_format": self.current_format,
+                "current_job_id": None if self.current_job is None else self.current_job.of_id,
+            },
+            "queue_size": len(self.queue),
+            "completed_count": len(self._completed),
+            "total_lateness_min_est": total_late,
+            "counters_min": {
+                "downtime": self._downtime_min,
+                "stopped": self._stopped_min,
+                "idle": self._idle_min,
+                "producing": self._producing_min,
+            }
+        }
 
 
 def load_engine_from_dir(data_dir: str) -> SchedulerEngine:

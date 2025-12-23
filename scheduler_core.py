@@ -638,6 +638,14 @@ class SchedulerEngine:
                 "producing": self._producing_min,
             }
         }
+    
+    def get_hourly_report(self) -> Dict[str, Any]:
+        """
+        Public hourly report (used by realtime_runner).
+        """
+        with self._lock:
+            return self._hourly_report_snapshot()
+
 
 
 def load_engine_from_dir(data_dir: str) -> SchedulerEngine:

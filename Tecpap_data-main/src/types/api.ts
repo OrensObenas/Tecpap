@@ -120,6 +120,24 @@ export interface PlanItem {
   note?: string;
 }
 
+// types (dans src/types/api.ts)
+export interface WorkOrder {
+  of_id: string;
+  format: string;
+  due_date?: string;
+  priority: number;
+  work_nominal_min?: number;
+}
+
+export interface CreateWorkOrderRequest {
+  of_id: string;
+  format: string;
+  due_date?: string;
+  priority: number;
+  work_nominal_min: number;
+}
+
+
 export type EventType =
   | 'BREAKDOWN_START'
   | 'BREAKDOWN_END'

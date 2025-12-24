@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { APIError } from '../services/api';
 
 interface PollingOptions {
   intervalMs: number;
@@ -12,28 +11,29 @@ export function usePolling<T>(
   options: PollingOptions
 ) {
   const [data, setData] = useState<T | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false); // ✅ important
   const [error, setError] = useState<Error | null>(null);
+
   const intervalRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
 
   const { intervalMs, enabled = true, onError } = options;
 
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (setLoadingFlag: boolean) => {
+    if (setLoadingFlag) setLoading(true);
     try {
       const result = await fetchFn();
-      if (mountedRef.current) {
-        setData(result);
-        setError(null);
-        setLoading(false);
-      }
+      if (!mountedRef.current) return;
+      setData(result);
+      setError(null);
     } catch (err) {
-      if (mountedRef.current) {
-        const error = err instanceof Error ? err : new Error('Unknown error');
-        setError(error);
-        setLoading(false);
-        onError?.(error);
-      }
+      if (!mountedRef.current) return;
+      const e = err instanceof Error ? err : new Error('Unknown error');
+      setError(e);
+      onError?.(e);
+    } finally {
+      if (!mountedRef.current) return;
+      if (setLoadingFlag) setLoading(false);
     }
   }, [fetchFn, onError]);
 
@@ -45,18 +45,19 @@ export function usePolling<T>(
   }, []);
 
   useEffect(() => {
-    if (!enabled) {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
-      return;
+    // clear previous
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
     }
 
-    fetchData();
+    if (!enabled) return;
+
+    // initial fetch (no spinner by default)
+    fetchData(false);
 
     intervalRef.current = window.setInterval(() => {
-      fetchData();
+      fetchData(false);
     }, intervalMs);
 
     return () => {
@@ -67,44 +68,9 @@ export function usePolling<T>(
     };
   }, [enabled, intervalMs, fetchData]);
 
-  const refetch = useCallback(() => {
-    setLoading(true);
-    fetchData();
+  const refetch = useCallback(async () => {
+    await fetchData(true); // ✅ show spinner only on manual refetch
   }, [fetchData]);
 
   return { data, loading, error, refetch };
-}
-
-export function useApiCall<T>() {
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<Error | null>(null);
-  const mountedRef = useRef(true);
-
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
-
-  const execute = useCallback(async (fn: () => Promise<T>): Promise<T | null> => {
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await fn();
-      if (mountedRef.current) {
-        setLoading(false);
-      }
-      return result;
-    } catch (err) {
-      const error = err instanceof Error ? err : new Error('Unknown error');
-      if (mountedRef.current) {
-        setError(error);
-        setLoading(false);
-      }
-      throw error;
-    }
-  }, []);
-
-  return { loading, error, execute };
 }

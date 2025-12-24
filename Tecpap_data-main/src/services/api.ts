@@ -1,3 +1,4 @@
+// src/services/api.ts
 import type {
   StartSimulationRequest,
   StartSimulationResponse,
@@ -10,11 +11,14 @@ import type {
   EventLog,
   PlanItem,
   EngineState,
+  WorkOrder,
+  CreateWorkOrderRequest,
 } from '../types/api';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
 
-class APIError extends Error {
+export class APIError extends Error {
   constructor(
     message: string,
     public status?: number,
@@ -41,12 +45,13 @@ async function handleResponse<T>(response: Response): Promise<T> {
     );
   }
 
-  const contentType = response.headers.get('content-type');
-  if (contentType?.includes('application/json')) {
+  const contentType = response.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
     return response.json();
   }
 
-  return response.text() as T;
+  // CSV/text endpoints
+  return (await response.text()) as unknown as T;
 }
 
 async function fetchAPI<T>(
@@ -55,36 +60,50 @@ async function fetchAPI<T>(
 ): Promise<T> {
   const url = `${API_BASE_URL}${endpoint}`;
 
-  const defaultHeaders: HeadersInit = {
-    'Content-Type': 'application/json',
+  const headers: HeadersInit = {
+    ...(options.headers || {}),
   };
+
+  // Inject JSON header only if we send a body and header not already set
+  const hasBody = typeof options.body !== 'undefined';
+  if (hasBody && !('Content-Type' in headers)) {
+    headers['Content-Type'] = 'application/json';
+  }
 
   const config: RequestInit = {
     ...options,
-    headers: {
-      ...defaultHeaders,
-      ...options.headers,
-    },
+    headers,
   };
 
   try {
     const response = await fetch(url, config);
-    return handleResponse<T>(response);
-  } catch (error) {
-    if (error instanceof APIError) {
-      throw error;
-    }
-    throw new APIError(
-      error instanceof Error ? error.message : 'Network error'
-    );
+    return await handleResponse<T>(response);
+  } catch (err) {
+    if (err instanceof APIError) throw err;
+    throw new APIError(err instanceof Error ? err.message : 'Network error');
   }
 }
 
+export type RecomputePlanResponse = {
+  ok: boolean;
+  changed: boolean;
+  strategy: string;
+  before: string[];
+  after: string[];
+  pid?: number;
+};
+
 export const api = {
+  // -----------------------
+  // Engine state
+  // -----------------------
   async getState(): Promise<EngineState> {
     return fetchAPI<EngineState>('/state');
   },
 
+  // -----------------------
+  // Realtime runner
+  // -----------------------
   async startSimulation(
     params: StartSimulationRequest
   ): Promise<StartSimulationResponse> {
@@ -95,9 +114,7 @@ export const api = {
   },
 
   async stopSimulation(): Promise<StopSimulationResponse> {
-    return fetchAPI<StopSimulationResponse>('/realtime/stop', {
-      method: 'POST',
-    });
+    return fetchAPI<StopSimulationResponse>('/realtime/stop', { method: 'POST' });
   },
 
   async getRealtimeState(): Promise<RealtimeState> {
@@ -108,6 +125,9 @@ export const api = {
     return fetchAPI<HourlyReport[]>('/realtime/hourly');
   },
 
+  // -----------------------
+  // Events
+  // -----------------------
   async sendEvent(event: EventRequest): Promise<EventResponse> {
     return fetchAPI<EventResponse>('/events', {
       method: 'POST',
@@ -126,13 +146,36 @@ export const api = {
     return fetchAPI<EventLog[]>(`/events/log?limit=${limit}`);
   },
 
+  // -----------------------
+  // Work Orders (OF)
+  // -----------------------
+  async getWorkOrders(limit = 200): Promise<WorkOrder[]> {
+    return fetchAPI<WorkOrder[]>(`/work-orders?limit=${limit}`);
+  },
+
+  async createWorkOrder(payload: CreateWorkOrderRequest): Promise<WorkOrder> {
+    return fetchAPI<WorkOrder>('/work-orders', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  // -----------------------
+  // Planning
+  // -----------------------
   async getPlan(limit = 30): Promise<PlanItem[]> {
     return fetchAPI<PlanItem[]>(`/plan?limit=${limit}`);
   },
 
-  getPlanExportURL(): string {
-    return `${API_BASE_URL}/plan/export.csv`;
+  async recomputePlan(strategy?: string): Promise<RecomputePlanResponse> {
+    // backend: POST /plan/recompute (optionnel: ?strategy=...)
+    const qs = strategy ? `?strategy=${encodeURIComponent(strategy)}` : '';
+    return fetchAPI<RecomputePlanResponse>(`/plan/recompute${qs}`, {
+      method: 'POST',
+    });
+  },
+
+  getPlanExportURL(limit = 200): string {
+    return `${API_BASE_URL}/plan/export.csv?limit=${limit}`;
   },
 };
-
-export { APIError };

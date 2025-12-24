@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { usePolling, useApiCall } from '../hooks/usePolling';
+import { useState, useCallback } from 'react';
+import { usePolling } from '../hooks/usePolling';
 import { api } from '../services/api';
 import { Card } from '../components/Card';
 import { Button } from '../components/Button';
@@ -29,21 +29,46 @@ export function DashboardLive() {
   const [compressToSeconds, setCompressToSeconds] = useState(120);
   const [tickSeconds, setTickSeconds] = useState(0.2);
 
-  const { data: realtimeState, loading, error, refetch } = usePolling(
-    () => api.getRealtimeState(),
-    { intervalMs: 1000, enabled: true }
+  const [actionLoading, setActionLoading] = useState(false);
+
+  // ✅ Stabilise les fonctions passées au polling
+  const fetchRealtime = useCallback(() => api.getRealtimeState(), []);
+  const fetchEventLog = useCallback(() => api.getEventLog(12), []);
+
+  const {
+    data: realtimeState,
+    loading,
+    error,
+    refetch: refetchRealtime,
+  } = usePolling(fetchRealtime, { intervalMs: 1000, enabled: true });
+
+  const isRunning = realtimeState?.runner?.running || false;
+  const engine = realtimeState?.engine;
+
+  // ✅ Log moins fréquent + seulement si runner en marche
+  const {
+    data: eventLog,
+    refetch: refetchLog,
+  } = usePolling(fetchEventLog, {
+    intervalMs: 5000,
+    enabled: isRunning,
+  });
+
+  const safeExecute = useCallback(
+    async <T,>(fn: () => Promise<T>) => {
+      setActionLoading(true);
+      try {
+        return await fn();
+      } finally {
+        setActionLoading(false);
+      }
+    },
+    []
   );
 
-  const { data: eventLog } = usePolling(
-    () => api.getEventLog(12),
-    { intervalMs: 2000, enabled: true }
-  );
-
-  const { loading: actionLoading, execute } = useApiCall();
-
-  const handleStart = async () => {
+  const handleStart = useCallback(async () => {
     try {
-      const result = await execute(() =>
+      const result = await safeExecute(() =>
         api.startSimulation({
           day_start: dayStart,
           day_end: dayEnd,
@@ -52,43 +77,61 @@ export function DashboardLive() {
         })
       );
 
-      if (result?.status === 'already_running') {
+      if ((result as any)?.status === 'already_running') {
         addToast('warning', 'Simulation already running');
       } else {
         addToast('success', 'Simulation started');
       }
-      refetch();
+
+      // ✅ refresh immédiat
+      refetchRealtime();
     } catch (err) {
       addToast('error', 'Failed to start simulation', (err as Error).message);
     }
-  };
+  }, [
+    safeExecute,
+    dayStart,
+    dayEnd,
+    compressToSeconds,
+    tickSeconds,
+    addToast,
+    refetchRealtime,
+  ]);
 
-  const handleStop = async () => {
+  const handleStop = useCallback(async () => {
     try {
-      await execute(() => api.stopSimulation());
+      await safeExecute(() => api.stopSimulation());
       addToast('success', 'Simulation stopped');
-      refetch();
+
+      // ✅ refresh immédiat
+      refetchRealtime();
     } catch (err) {
       addToast('error', 'Failed to stop simulation', (err as Error).message);
     }
-  };
+  }, [safeExecute, addToast, refetchRealtime]);
 
-  const sendQuickEvent = async (event: EventNowRequest) => {
-    try {
-      const result = await execute(() => api.sendEventNow(event));
-      if (result) {
-        const msg = result.replanned
-          ? `Event sent. Replanned: ${result.replan_reason}`
-          : `Event sent (${result.status})`;
-        addToast(result.status === 'ok' ? 'success' : 'warning', msg);
+  const sendQuickEvent = useCallback(
+    async (event: EventNowRequest) => {
+      try {
+        const result = await safeExecute(() => api.sendEventNow(event));
+
+        if (result) {
+          const msg = (result as any).replanned
+            ? `Event sent. Replanned: ${(result as any).replan_reason}`
+            : `Event sent (${(result as any).status})`;
+
+          addToast((result as any).status === 'ok' ? 'success' : 'warning', msg);
+        }
+
+        // ✅ Au lieu de poller plus vite, on force un refresh juste après action
+        refetchRealtime();
+        refetchLog();
+      } catch (err) {
+        addToast('error', 'Failed to send event', (err as Error).message);
       }
-    } catch (err) {
-      addToast('error', 'Failed to send event', (err as Error).message);
-    }
-  };
-
-  const isRunning = realtimeState?.runner?.running || false;
-  const engine = realtimeState?.engine;
+    },
+    [safeExecute, addToast, refetchRealtime, refetchLog]
+  );
 
   return (
     <div className="space-y-6">
@@ -105,9 +148,10 @@ export function DashboardLive() {
               value={dayStart}
               onChange={(e) => setDayStart(e.target.value)}
               className="w-full border rounded px-3 py-2 text-sm"
-              disabled={isRunning}
+              disabled={isRunning || actionLoading}
             />
           </div>
+
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
               Day End
@@ -117,9 +161,10 @@ export function DashboardLive() {
               value={dayEnd}
               onChange={(e) => setDayEnd(e.target.value)}
               className="w-full border rounded px-3 py-2 text-sm"
-              disabled={isRunning}
+              disabled={isRunning || actionLoading}
             />
           </div>
+
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
               Compress to (seconds)
@@ -129,9 +174,11 @@ export function DashboardLive() {
               value={compressToSeconds}
               onChange={(e) => setCompressToSeconds(Number(e.target.value))}
               className="w-full border rounded px-3 py-2 text-sm"
-              disabled={isRunning}
+              disabled={isRunning || actionLoading}
+              min={1}
             />
           </div>
+
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
               Tick (seconds)
@@ -142,7 +189,8 @@ export function DashboardLive() {
               value={tickSeconds}
               onChange={(e) => setTickSeconds(Number(e.target.value))}
               className="w-full border rounded px-3 py-2 text-sm"
-              disabled={isRunning}
+              disabled={isRunning || actionLoading}
+              min={0.05}
             />
           </div>
         </div>
@@ -157,6 +205,7 @@ export function DashboardLive() {
             <Play className="w-4 h-4 mr-1 inline" />
             Start
           </Button>
+
           <Button
             onClick={handleStop}
             disabled={!isRunning || actionLoading}
@@ -174,7 +223,7 @@ export function DashboardLive() {
         </Card>
       ) : error ? (
         <Card>
-          <ErrorMessage error={error} onRetry={refetch} />
+          <ErrorMessage error={error} onRetry={refetchRealtime} />
         </Card>
       ) : (
         <>
@@ -186,6 +235,7 @@ export function DashboardLive() {
                   {engine?.now ? formatDateTime(engine.now) : 'N/A'}
                 </div>
               </div>
+
               <div>
                 <div className="text-sm text-gray-600 mb-1">Runner Status</div>
                 <div>
@@ -194,6 +244,7 @@ export function DashboardLive() {
                   </Badge>
                 </div>
               </div>
+
               <div>
                 <div className="text-sm text-gray-600 mb-1">Next Report</div>
                 <div className="text-sm font-medium">
@@ -216,16 +267,19 @@ export function DashboardLive() {
                     {engine?.is_running ? 'YES' : 'NO'}
                   </Badge>
                 </div>
+
                 <div>
                   <div className="text-xs text-gray-600">Down</div>
                   <Badge variant={engine?.is_down ? 'error' : 'success'}>
                     {engine?.is_down ? 'YES' : 'NO'}
                   </Badge>
                 </div>
+
                 <div>
                   <div className="text-xs text-gray-600">Speed Factor</div>
-                  <div className="font-bold">{engine?.speed_factor || 1.0}</div>
+                  <div className="font-bold">{engine?.speed_factor ?? 1.0}</div>
                 </div>
+
                 <div>
                   <div className="text-xs text-gray-600">Current Format</div>
                   <div className="font-medium">{engine?.current_format || 'None'}</div>
@@ -257,6 +311,7 @@ export function DashboardLive() {
                       <Badge variant="info">{engine.current_job.priority}</Badge>
                     </div>
                   </div>
+
                   <div className="grid grid-cols-2 gap-3 mt-3 text-sm">
                     <div>
                       <div className="text-gray-600">Remaining Setup</div>
@@ -283,11 +338,11 @@ export function DashboardLive() {
               <div className="grid grid-cols-2 gap-4 text-sm">
                 <div>
                   <div className="text-gray-600">Queue Size</div>
-                  <div className="text-xl font-bold">{engine?.queue_size || 0}</div>
+                  <div className="text-xl font-bold">{engine?.queue_size ?? 0}</div>
                 </div>
                 <div>
                   <div className="text-gray-600">Pool Remaining</div>
-                  <div className="text-xl font-bold">{engine?.pool_remaining || 0}</div>
+                  <div className="text-xl font-bold">{engine?.pool_remaining ?? 0}</div>
                 </div>
               </div>
             </div>
@@ -336,58 +391,60 @@ export function DashboardLive() {
               <Button
                 size="sm"
                 variant="danger"
-                onClick={() =>
-                  sendQuickEvent({ type: 'BREAKDOWN_START', value: 'MAJOR' })
-                }
-                disabled={!isRunning}
+                onClick={() => sendQuickEvent({ type: 'BREAKDOWN_START', value: 'MAJOR' })}
+                disabled={!isRunning || actionLoading}
               >
                 <Zap className="w-3 h-3 mr-1 inline" />
                 Breakdown Start
               </Button>
+
               <Button
                 size="sm"
                 variant="success"
-                onClick={() =>
-                  sendQuickEvent({ type: 'BREAKDOWN_END', value: 'MAJOR' })
-                }
-                disabled={!isRunning}
+                onClick={() => sendQuickEvent({ type: 'BREAKDOWN_END', value: 'MAJOR' })}
+                disabled={!isRunning || actionLoading}
               >
                 Breakdown End
               </Button>
+
               <Button
                 size="sm"
                 onClick={() => sendQuickEvent({ type: 'SPEED_CHANGE', value: '0.8' })}
-                disabled={!isRunning}
+                disabled={!isRunning || actionLoading}
               >
                 Speed 0.8x
               </Button>
+
               <Button
                 size="sm"
                 onClick={() => sendQuickEvent({ type: 'SPEED_CHANGE', value: '1.0' })}
-                disabled={!isRunning}
+                disabled={!isRunning || actionLoading}
               >
                 Speed 1.0x
               </Button>
+
               <Button
                 size="sm"
                 onClick={() => sendQuickEvent({ type: 'SPEED_CHANGE', value: '1.2' })}
-                disabled={!isRunning}
+                disabled={!isRunning || actionLoading}
               >
                 Speed 1.2x
               </Button>
+
               <Button
                 size="sm"
                 variant="secondary"
                 onClick={() => sendQuickEvent({ type: 'SHIFT_STOP', value: '' })}
-                disabled={!isRunning}
+                disabled={!isRunning || actionLoading}
               >
                 Shift Stop
               </Button>
+
               <Button
                 size="sm"
                 variant="success"
                 onClick={() => sendQuickEvent({ type: 'SHIFT_START', value: '' })}
-                disabled={!isRunning}
+                disabled={!isRunning || actionLoading}
               >
                 Shift Start
               </Button>
@@ -395,7 +452,11 @@ export function DashboardLive() {
           </Card>
 
           <Card title="Recent Events">
-            {eventLog && eventLog.length > 0 ? (
+            {!isRunning ? (
+              <div className="text-center text-gray-500 py-8">
+                Start the simulation to view live events.
+              </div>
+            ) : eventLog && eventLog.length > 0 ? (
               <div className="overflow-x-auto">
                 <table className="min-w-full text-sm">
                   <thead className="bg-gray-50">
@@ -418,18 +479,12 @@ export function DashboardLive() {
                         </td>
                         <td className="px-3 py-2 font-medium">{log.type}</td>
                         <td className="px-3 py-2">
-                          <Badge
-                            variant={log.status === 'ok' ? 'success' : 'warning'}
-                          >
+                          <Badge variant={log.status === 'ok' ? 'success' : 'warning'}>
                             {log.status}
                           </Badge>
                         </td>
                         <td className="px-3 py-2">
-                          {log.replanned ? (
-                            <Badge variant="info">YES</Badge>
-                          ) : (
-                            'No'
-                          )}
+                          {log.replanned ? <Badge variant="info">YES</Badge> : 'No'}
                         </td>
                         <td className="px-3 py-2">
                           {log.breakdown_duration_min

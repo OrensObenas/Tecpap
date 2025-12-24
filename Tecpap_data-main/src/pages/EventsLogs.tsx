@@ -1,5 +1,5 @@
-import { useState, useMemo } from 'react';
-import { usePolling, useApiCall } from '../hooks/usePolling';
+import { useState, useMemo, useCallback } from 'react';
+import { usePolling } from '../hooks/usePolling';
 import { api } from '../services/api';
 import { Card } from '../components/Card';
 import { Button } from '../components/Button';
@@ -24,48 +24,57 @@ export function EventsLogs() {
   const [filterReplanned, setFilterReplanned] = useState(false);
   const [filterBreakdown, setFilterBreakdown] = useState(false);
 
-  const { data: eventLog, loading, error, refetch } = usePolling(
-    () => api.getEventLog(200),
-    { intervalMs: 2000, enabled: true }
-  );
+  const [sendLoading, setSendLoading] = useState(false);
 
-  const { loading: sendLoading, execute } = useApiCall();
+  // ✅ stabilise fetcher (évite relances de polling si rerender)
+  const fetchEventLog = useCallback(() => api.getEventLog(200), []);
 
-  const handleSendEvent = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // ✅ polling moins agressif qu’avant (2s) + anti-overlap via hook corrigé
+  const { data: eventLog, loading, error, refetch } = usePolling(fetchEventLog, {
+    intervalMs: 5000,
+    enabled: true,
+  });
 
-    if (sendMode === 'timestamp' && !eventTimestamp) {
-      addToast('error', 'Timestamp is required');
-      return;
-    }
+  const handleSendEvent = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
 
-    try {
-      let result;
-      if (sendMode === 'now') {
-        result = await execute(() =>
-          api.sendEventNow({ type: eventType, value: eventValue })
-        );
-      } else {
-        result = await execute(() =>
-          api.sendEvent({
+      if (sendMode === 'timestamp' && !eventTimestamp) {
+        addToast('error', 'Timestamp is required');
+        return;
+      }
+
+      setSendLoading(true);
+      try {
+        let result;
+
+        if (sendMode === 'now') {
+          result = await api.sendEventNow({ type: eventType, value: eventValue });
+        } else {
+          result = await api.sendEvent({
             timestamp: eventTimestamp,
             type: eventType,
             value: eventValue,
-          })
-        );
-      }
+          });
+        }
 
-      if (result) {
         const msg = result.replanned
           ? `Event sent. Replanned: ${result.replan_reason}`
           : `Event sent (${result.status})`;
+
         addToast(result.status === 'ok' ? 'success' : 'warning', msg);
         setEventValue('');
+
+        // ✅ refresh immédiat après action
+        refetch();
+      } catch (err) {
+        addToast('error', 'Failed to send event', (err as Error).message);
+      } finally {
+        setSendLoading(false);
       }
-    } catch (err) {
-      addToast('error', 'Failed to send event', (err as Error).message);
-    }
-  };
+    },
+    [sendMode, eventTimestamp, addToast, eventType, eventValue, refetch]
+  );
 
   const filteredLogs = useMemo(() => {
     if (!eventLog) return [];
@@ -79,9 +88,9 @@ export function EventsLogs() {
         const search = searchText.toLowerCase();
         return (
           log.type.toLowerCase().includes(search) ||
-          log.value.toLowerCase().includes(search) ||
-          log.reason?.toLowerCase().includes(search) ||
-          log.replan_reason?.toLowerCase().includes(search)
+          (log.value || '').toLowerCase().includes(search) ||
+          (log.reason || '').toLowerCase().includes(search) ||
+          (log.replan_reason || '').toLowerCase().includes(search)
         );
       }
 
@@ -167,7 +176,7 @@ export function EventsLogs() {
             )}
           </div>
 
-          <Button type="submit" loading={sendLoading}>
+          <Button type="submit" loading={sendLoading} disabled={sendLoading}>
             <Send className="w-4 h-4 mr-1 inline" />
             Send Event
           </Button>
@@ -177,12 +186,7 @@ export function EventsLogs() {
       <Card title="Event Logs">
         <div className="mb-4 space-y-3">
           <div className="flex gap-2 items-center">
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={refetch}
-              disabled={loading}
-            >
+            <Button size="sm" variant="secondary" onClick={refetch} disabled={loading}>
               <RefreshCw className="w-4 h-4 mr-1 inline" />
               Refresh
             </Button>
@@ -252,9 +256,7 @@ export function EventsLogs() {
                 {filteredLogs.map((log, idx) => (
                   <tr
                     key={idx}
-                    className={
-                      log.status === 'ignored' ? 'bg-yellow-50' : 'hover:bg-gray-50'
-                    }
+                    className={log.status === 'ignored' ? 'bg-yellow-50' : 'hover:bg-gray-50'}
                   >
                     <td className="px-3 py-2 whitespace-nowrap">
                       {formatDateTime(log.received_at)}
@@ -270,11 +272,7 @@ export function EventsLogs() {
                       </Badge>
                     </td>
                     <td className="px-3 py-2">
-                      {log.late_applied ? (
-                        <Badge variant="warning">YES</Badge>
-                      ) : (
-                        '-'
-                      )}
+                      {log.late_applied ? <Badge variant="warning">YES</Badge> : '-'}
                     </td>
                     <td className="px-3 py-2">
                       {log.replanned ? <Badge variant="info">YES</Badge> : '-'}
@@ -283,9 +281,7 @@ export function EventsLogs() {
                       {log.reason || log.replan_reason || '-'}
                     </td>
                     <td className="px-3 py-2">
-                      {log.breakdown_duration_min
-                        ? `${log.breakdown_duration_min}min`
-                        : '-'}
+                      {log.breakdown_duration_min ? `${log.breakdown_duration_min}min` : '-'}
                     </td>
                   </tr>
                 ))}

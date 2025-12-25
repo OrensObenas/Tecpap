@@ -3,10 +3,9 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
-from scheduler_core import SchedulerEngine
-from scheduler_core import Event  # en haut du fichier si pas déjà
+from scheduler_core import SchedulerEngine, Event
 
 
 @dataclass
@@ -40,7 +39,16 @@ class RealTimeRunner:
         with self._lock:
             return self._running
 
-    def start(self, cfg: RunnerConfig) -> Dict[str, Any]:
+    def start(
+        self,
+        cfg: RunnerConfig,
+        on_started: Optional[Callable[[SchedulerEngine], None]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Start the realtime compressed simulation.
+        `on_started(engine)` is called AFTER engine init (set_time + SHIFT_START),
+        so you can re-apply an ordering / recompute strategy without it being reset.
+        """
         with self._lock:
             if self._running:
                 return {"status": "already_running"}
@@ -51,13 +59,27 @@ class RealTimeRunner:
 
             # reset engine to start
             self.engine.set_time(cfg.day_start)
-            
-            # ... dans start() après set_time(...)
+
+            # initialize shift
             self.engine.handle_event(
                 Event(timestamp=cfg.day_start, type="SHIFT_START", value=""),
-                source="realtime/auto"
+                source="realtime/auto",
             )
 
+        # IMPORTANT: run on_started outside the lock to avoid deadlocks
+        if on_started is not None:
+            try:
+                on_started(self.engine)
+            except Exception as e:
+                # Do not block startup; just report warning
+                with self._lock:
+                    self._stop_event.clear()
+                    self._thread = threading.Thread(target=self._loop, daemon=True)
+                    self._running = True
+                    self._thread.start()
+                return {"status": "started_with_warning", "warning": str(e)}
+
+        with self._lock:
             self._stop_event.clear()
             self._thread = threading.Thread(target=self._loop, daemon=True)
             self._running = True
@@ -79,12 +101,15 @@ class RealTimeRunner:
             return {"status": "stopped"}
 
     def state(self) -> Dict[str, Any]:
-        # engine.get_state() has its own lock inside engine
         st = self.engine.get_state()
         with self._lock:
             cfg = self._config
             running = self._running
-            next_r = self._next_report_time.isoformat(timespec="minutes") if self._next_report_time else None
+            next_r = (
+                self._next_report_time.isoformat(timespec="minutes")
+                if self._next_report_time
+                else None
+            )
 
         return {
             "runner": {
@@ -95,7 +120,7 @@ class RealTimeRunner:
                 "tick_seconds": cfg.tick_seconds if cfg else None,
                 "next_report_time": next_r,
             },
-            "engine": st
+            "engine": st,
         }
 
     def hourly_reports(self) -> List[Dict[str, Any]]:
@@ -104,20 +129,19 @@ class RealTimeRunner:
 
     # ------------- internal -------------
     def _loop(self):
-        cfg = self._config
+        with self._lock:
+            cfg = self._config
         if cfg is None:
             return
 
         total_sim_minutes = int((cfg.day_end - cfg.day_start).total_seconds() // 60)
         total_real_seconds = max(1, int(cfg.compress_to_seconds))
 
-        # simulated minutes per real second
         sim_minutes_per_sec = total_sim_minutes / float(total_real_seconds)
 
         tick = max(0.1, float(cfg.tick_seconds))
         sim_minutes_per_tick = sim_minutes_per_sec * tick
 
-        # accumulate fractional minutes -> convert to whole minutes
         acc = 0.0
 
         while not self._stop_event.is_set():
@@ -126,20 +150,40 @@ class RealTimeRunner:
             if now_sim >= cfg.day_end:
                 break
 
-            # advance simulated time
             acc += sim_minutes_per_tick
             step_min = int(acc)
+
             if step_min > 0:
                 acc -= step_min
                 self.engine.set_time(now_sim + timedelta(minutes=step_min))
-
-                # produce hourly reports when passing thresholds
                 self._maybe_push_reports()
 
             time.sleep(tick)
 
         with self._lock:
             self._running = False
+
+    def _make_hourly_snapshot(self) -> Dict[str, Any]:
+        """
+        SchedulerEngine n'a pas forcément get_hourly_report().
+        On fabrique donc un "rapport" stable basé sur get_state().
+        """
+        st = self.engine.get_state()
+        # st contient déjà kpi, breakdown, queue_size, etc.
+        return {
+            "time": st.get("now"),
+            "machine": {
+                "is_running": st.get("is_running"),
+                "is_down": st.get("is_down"),
+                "speed_factor": st.get("speed_factor"),
+                "current_format": st.get("current_format"),
+                "current_job_id": (st.get("current_job") or {}).get("of_id") if isinstance(st.get("current_job"), dict) else None,
+            },
+            "queue_size": st.get("queue_size"),
+            "pool_remaining": st.get("pool_remaining"),
+            "kpi": st.get("kpi"),
+            "breakdown": st.get("breakdown"),
+        }
 
     def _maybe_push_reports(self):
         """
@@ -153,9 +197,8 @@ class RealTimeRunner:
 
         now_sim = datetime.fromisoformat(self.engine.get_state()["now"])
 
-        # If we passed report time, push and increment by 1 hour repeatedly
         while now_sim >= next_report:
-            rep = self.engine.get_hourly_report()
+            rep = self._make_hourly_snapshot()
             with self._lock:
                 self._hourly_reports.append(rep)
                 next_report = next_report + timedelta(hours=1)

@@ -153,6 +153,10 @@ class SchedulerEngine:
 
         # queue
         self.queue: List[WorkOrder] = []
+        # if True, internal refresh won't reorder queue (keeps external strategy order)
+        self.queue_locked: bool = False
+        # name of the current queue strategy (informational)
+        self.queue_strategy: str = "EDD_PRIORITY"
 
         # late events policy
         self.max_event_lateness_min: int = 120
@@ -343,11 +347,15 @@ class SchedulerEngine:
         # speed change => KPI-based
         if t == "SPEED_CHANGE":
             changed = self._maybe_replan(reason="SPEED_CHANGE")
-            return (changed, "speed_change")
-
-        return (False, "not_critical")
-
     def _refresh_queue_from_pool(self):
+        """
+        Move newly released work orders from the pool into the queue.
+
+        IMPORTANT:
+        - If queue_locked is True, we must NOT reorder the queue here.
+          Otherwise any explicit ordonnancement (e.g., FORMAT_PRIORITY) would be overwritten
+          by the default EDD/priority sort at every tick/event.
+        """
         existing_ids = {wo.of_id for wo in self.queue}
         if self.current_job:
             existing_ids.add(self.current_job.of_id)
@@ -363,8 +371,13 @@ class SchedulerEngine:
                 remaining_pool.append(wo)
 
         self._pool = remaining_pool
-        self.queue.extend(newly_added)
-        self.queue.sort(key=lambda x: (x.due_date, -x.priority))
+        if newly_added:
+            # Preserve queue order if locked; just append new jobs at the end
+            self.queue.extend(newly_added)
+
+        # Default behavior: keep queue sorted by due date then priority
+        if not self.queue_locked:
+            self.queue.sort(key=lambda x: (x.due_date, -x.priority))
 
     def _advance_to(self, target: datetime):
         if target <= self.now:
@@ -426,11 +439,15 @@ class SchedulerEngine:
             self.is_running = True
             return None
 
-        if t == "SHIFT_STOP":
-            self.is_running = False
+        if t == "URGENT_ORDER":
+            urgent = parse_urgent_payload(ev.value, created_at=self.now)
+            # URGENT should go to the front if the queue is locked (don't reorder everything)
+            if self.queue_locked:
+                self.queue.insert(0, urgent)
+            else:
+                self.queue.append(urgent)
+                self.queue.sort(key=lambda x: (x.due_date, -x.priority))
             return None
-
-        if t == "SPEED_CHANGE":
             try:
                 sf = float(ev.value)
                 if sf > 0:

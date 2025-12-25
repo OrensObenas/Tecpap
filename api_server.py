@@ -181,6 +181,7 @@ class RealTimeStartRequest(BaseModel):
     day_end: str
     compress_to_seconds: int = 600  # default 10 min
     tick_seconds: float = 0.5
+    strategy: str = "FORMAT_PRIORITY"  # ✅ NEW
 
 
 # -----------------------
@@ -477,6 +478,12 @@ def simulate_day(req: SimDayRequest):
 # -----------------------
 # Realtime compressed simulation
 # -----------------------
+def apply_recompute_strategy(strategy: str):
+    # on réutilise la logique déjà dans /plan/recompute
+    # en appelant directement la fonction recompute_plan avec un request mock.
+    req = ReplanRequest(strategy=strategy)
+    recompute_plan(req)  # modifie ENGINE.queue
+
 
 @app.post("/realtime/start")
 def realtime_start(req: RealTimeStartRequest):
@@ -498,7 +505,7 @@ def realtime_start(req: RealTimeStartRequest):
         compress_to_seconds=req.compress_to_seconds,
         tick_seconds=req.tick_seconds
     )
-    return RUNNER.start(cfg)
+    return RUNNER.start(cfg, on_started=lambda eng: apply_recompute_strategy(req.strategy))
 
 
 @app.post("/realtime/stop")

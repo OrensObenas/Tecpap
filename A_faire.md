@@ -12,10 +12,11 @@
 - (fait) Ajout d’un helper `buildUrgentOrderValue` et type `UrgentOrderPayload` pour construire le payload `URGENT_ORDER` (`of_id=...;due=...;format=...;qty=...;nominal_rate=...;duration_min=...;priority=...`).
 
 3) Pages à adapter
-- `src/pages/Reports.tsx`: lire les champs dans `report.machine.is_running` / `machine.is_down`, etc., ou consommer les champs mappés si transformés dans `api.ts`. Les séries `queue_size`, `completed_count`, `total_lateness_min_est`, `counters_min.*` restent valides.
-- `src/pages/EventsLogs.tsx`: changer la liste déroulante des types pour `URGENT_ORDER`; ajouter un hint sur le format de `value` (chaine `key=value;...`). Le backend ignore les événements en retard >120 min : éventuellement afficher une info/badge.
-- `src/pages/Planning.tsx`: retirer/masquer la stratégie `EDD_SETUP` ou la mapper sur `FORMAT_PRIORITY` pour éviter une 400. S’assurer que `due_date` envoyé est en ISO (datetime-local → `toISOString().slice(0,16)` ou équivalent).
-- `src/pages/DashboardLive.tsx`: l’état runner/engine est OK, mais si on veut afficher les infos panne, lire `engine.breakdown.down_start_time`, `down_reason`, `last_breakdown_duration_min`. Les boutons “urgent”/panne doivent envoyer des types supportés (`BREAKDOWN_START/END`, `SPEED_CHANGE`, `URGENT_ORDER` si ajouté).
+- (fait) `Reports.tsx` lit `report.machine.is_running/is_down`.
+- (fait) `EventsLogs.tsx` dropdown sur `URGENT_ORDER` + hint sur le format de value.
+- (fait) `Planning.tsx` verrouille la stratégie sur `FORMAT_PRIORITY` (dropdown désactivé).
+- (fait) `Planning.tsx`: conversion due_date -> ISO avant POST.
+- (fait) `DashboardLive.tsx`: affiche breakdown et bouton de test URGENT_ORDER.
 
 4) Base URL / CORS
 - Vérifier `VITE_API_BASE_URL` (par défaut `http://127.0.0.1:8000`) cohérent avec le backend; CORS backend autorise 5173 et 3000.

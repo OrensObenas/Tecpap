@@ -1,6 +1,6 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { usePolling } from '../hooks/usePolling';
-import { api } from '../services/api';
+import { api, buildUrgentOrderValue } from '../services/api';
 import { Card } from '../components/Card';
 import { Button } from '../components/Button';
 import { Badge } from '../components/Badge';
@@ -63,6 +63,20 @@ export function DashboardLive() {
         setActionLoading(false);
       }
     },
+    []
+  );
+
+  const demoUrgentValue = useMemo(
+    () =>
+      buildUrgentOrderValue({
+        of_id: 'URG-DEMO',
+        due: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        format: 'F1',
+        qty: 500,
+        nominal_rate: 400,
+        duration_min: 60,
+        priority: 10,
+      }),
     []
   );
 
@@ -287,6 +301,44 @@ export function DashboardLive() {
               </div>
             </div>
 
+            {engine?.breakdown && (
+              <div className="border-t pt-4 mt-4">
+                <h4 className="font-semibold mb-3">Breakdown</h4>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                  <div>
+                    <div className="text-gray-600">Started At</div>
+                    <div className="font-medium">
+                      {engine.breakdown.down_start_time
+                        ? formatDateTime(engine.breakdown.down_start_time)
+                        : '-'}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-gray-600">Reason</div>
+                    <div className="font-medium">
+                      {engine.breakdown.down_reason || '-'}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-gray-600">Last Duration</div>
+                    <div className="font-medium">
+                      {engine.breakdown.last_breakdown_duration_min
+                        ? formatDuration(engine.breakdown.last_breakdown_duration_min)
+                        : '-'}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-gray-600">Replan Threshold</div>
+                    <div className="font-medium">
+                      {engine.breakdown.replan_threshold_min
+                        ? formatDuration(engine.breakdown.replan_threshold_min)
+                        : '-'}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {engine?.current_job && (
               <div className="border-t pt-4 mt-4">
                 <h4 className="font-semibold mb-3">Current Job</h4>
@@ -405,6 +457,20 @@ export function DashboardLive() {
                 disabled={!isRunning || actionLoading}
               >
                 Breakdown End
+              </Button>
+
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() =>
+                  sendQuickEvent({
+                    type: 'URGENT_ORDER',
+                    value: demoUrgentValue,
+                  })
+                }
+                disabled={!isRunning || actionLoading}
+              >
+                Inject URGENT_ORDER
               </Button>
 
               <Button

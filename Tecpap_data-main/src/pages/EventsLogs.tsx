@@ -158,6 +158,9 @@ export function EventsLogs() {
                 placeholder="e.g., MAJOR, 1.2, OF_12345"
                 className="w-full border rounded px-3 py-2"
               />
+              <p className="text-xs text-gray-500 mt-1">
+                URGENT_ORDER: of_id=URG123;due=2026-01-05T12:00;format=F2;qty=800;nominal_rate=400;duration_min=90;priority=10
+              </p>
             </div>
 
             {sendMode === 'timestamp' && (

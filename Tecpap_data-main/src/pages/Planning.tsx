@@ -22,9 +22,7 @@ export function Planning() {
     work_nominal_min: 60,
   });
 
-  const [strategy, setStrategy] = useState<'FORMAT_PRIORITY' | 'EDD_SETUP'>(
-    'FORMAT_PRIORITY'
-  );
+  const [strategy] = useState<'FORMAT_PRIORITY'>('FORMAT_PRIORITY');
 
   // polling disabled: manual reload only (évite de spammer ton backend)
   const woPoll = usePolling(() => api.getWorkOrders(200), {
@@ -55,10 +53,14 @@ export function Planning() {
   const handleAdd = async () => {
     if (!canSubmit) return;
 
+    const dueISO = form.due_date
+      ? new Date(form.due_date).toISOString()
+      : undefined;
+
     await api.createWorkOrder({
       of_id: form.of_id.trim(),
       format: form.format.trim(),
-      due_date: form.due_date ? form.due_date : undefined,
+      due_date: dueISO,
       priority: Number(form.priority) || 0,
       work_nominal_min: Number(form.work_nominal_min) || 60,
     });
@@ -120,11 +122,10 @@ export function Planning() {
                   </label>
                   <select
                     value={strategy}
-                    onChange={(e) => setStrategy(e.target.value as any)}
-                    className="border rounded px-3 py-2"
+                    disabled
+                    className="border rounded px-3 py-2 bg-gray-100 text-gray-500"
                   >
-                    <option value="FORMAT_PRIORITY">Format → Priority</option>
-                    <option value="EDD_SETUP">EDD + Setup</option>
+                    <option value="FORMAT_PRIORITY">Format → Priority (backend only)</option>
                   </select>
                 </div>
 

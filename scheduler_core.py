@@ -3,7 +3,7 @@ import csv
 import copy
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
@@ -65,7 +65,11 @@ class PlanRow:
 # =========================
 
 def parse_iso(ts: str) -> datetime:
-    return datetime.fromisoformat(ts)
+    dt = datetime.fromisoformat(ts)
+    # Normalize any offset-aware datetime to naive UTC to keep comparisons sortable
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 def read_work_orders(path: Path) -> List[WorkOrder]:
     out: List[WorkOrder] = []

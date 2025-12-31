@@ -7,9 +7,9 @@
 - `RecomputePlanResponse`: inclure `total_setup_min_est` (et retirer `pid` si inutile) pour refléter `/plan/recompute`.
 
 2) API layer (`src/services/api.ts`)
-- Si on garde les anciens types plats pour `HourlyReport`, ajouter un mapping dans `getHourlyReports()` qui transforme la réponse backend (machine.* vers champs plats). Sinon, changer le front pour lire la structure native.
-- Option `recomputePlan`: le backend n’accepte que `FORMAT_PRIORITY` (renvoie 400 sinon). Forcer cette valeur ou désactiver `EDD_SETUP`.
-- Quand on envoie des événements urgents, utiliser `URGENT_ORDER` et respecter le payload `of_id=...;due=...;format=...;qty=...;nominal_rate=...;duration_min=...;priority=...`.
+- (fait) Le front lit désormais la structure native `machine.{is_running,...}` donc pas de mapping nécessaire pour `HourlyReport`.
+- (fait) `recomputePlan` force `FORMAT_PRIORITY` pour éviter les 400.
+- (fait) Ajout d’un helper `buildUrgentOrderValue` et type `UrgentOrderPayload` pour construire le payload `URGENT_ORDER` (`of_id=...;due=...;format=...;qty=...;nominal_rate=...;duration_min=...;priority=...`).
 
 3) Pages à adapter
 - `src/pages/Reports.tsx`: lire les champs dans `report.machine.is_running` / `machine.is_down`, etc., ou consommer les champs mappés si transformés dans `api.ts`. Les séries `queue_size`, `completed_count`, `total_lateness_min_est`, `counters_min.*` restent valides.

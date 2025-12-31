@@ -93,6 +93,31 @@ export type RecomputePlanResponse = {
   total_setup_min_est?: number;
 };
 
+export type UrgentOrderPayload = {
+  of_id: string;
+  due: string; // ISO
+  format: string;
+  qty: number;
+  nominal_rate: number;
+  duration_min: number;
+  priority?: number;
+};
+
+export function buildUrgentOrderValue(payload: UrgentOrderPayload): string {
+  const parts = [
+    `of_id=${payload.of_id}`,
+    `due=${payload.due}`,
+    `format=${payload.format}`,
+    `qty=${payload.qty}`,
+    `nominal_rate=${payload.nominal_rate}`,
+    `duration_min=${payload.duration_min}`,
+  ];
+  if (payload.priority !== undefined) {
+    parts.push(`priority=${payload.priority}`);
+  }
+  return parts.join(';');
+}
+
 export const api = {
   // -----------------------
   // Engine state
@@ -168,8 +193,10 @@ export const api = {
   },
 
   async recomputePlan(strategy?: string): Promise<RecomputePlanResponse> {
-    // backend: POST /plan/recompute (optionnel: ?strategy=...)
-    const qs = strategy ? `?strategy=${encodeURIComponent(strategy)}` : '';
+    // backend n'accepte que FORMAT_PRIORITY (sinon 400)
+    const selected = (strategy || 'FORMAT_PRIORITY').toUpperCase();
+    const safeStrategy = selected === 'FORMAT_PRIORITY' ? selected : 'FORMAT_PRIORITY';
+    const qs = `?strategy=${encodeURIComponent(safeStrategy)}`;
     return fetchAPI<RecomputePlanResponse>(`/plan/recompute${qs}`, {
       method: 'POST',
     });

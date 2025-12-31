@@ -90,7 +90,7 @@ export type RecomputePlanResponse = {
   strategy: string;
   before: string[];
   after: string[];
-  pid?: number;
+  total_setup_min_est?: number;
 };
 
 export const api = {

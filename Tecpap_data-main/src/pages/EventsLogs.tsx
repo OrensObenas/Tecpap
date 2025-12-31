@@ -143,7 +143,7 @@ export function EventsLogs() {
                 <option value="SPEED_CHANGE">SPEED_CHANGE</option>
                 <option value="SHIFT_START">SHIFT_START</option>
                 <option value="SHIFT_STOP">SHIFT_STOP</option>
-                <option value="URGENT_JOB">URGENT_JOB</option>
+                <option value="URGENT_ORDER">URGENT_ORDER</option>
               </select>
             </div>
 

@@ -30,9 +30,10 @@ export interface CurrentJob {
 }
 
 export interface BreakdownInfo {
-  type?: string;
-  started_at?: string;
-  duration_min?: number;
+  down_start_time?: string | null;
+  down_reason?: string;
+  last_breakdown_duration_min?: number;
+  replan_threshold_min?: number;
 }
 
 export interface KPI {
@@ -65,8 +66,13 @@ export interface RealtimeState {
 
 export interface HourlyReport {
   time: string;
-  is_running: boolean;
-  is_down: boolean;
+  machine: {
+    is_running: boolean;
+    is_down: boolean;
+    speed_factor: number;
+    current_format?: string | null;
+    current_job_id?: string | null;
+  };
   queue_size: number;
   completed_count: number;
   total_lateness_min_est: number;
@@ -144,4 +150,4 @@ export type EventType =
   | 'SPEED_CHANGE'
   | 'SHIFT_START'
   | 'SHIFT_STOP'
-  | 'URGENT_JOB';
+  | 'URGENT_ORDER';

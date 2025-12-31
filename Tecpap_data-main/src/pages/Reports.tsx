@@ -83,13 +83,13 @@ export function Reports() {
                         {formatDateTime(report.time)}
                       </td>
                       <td className="px-3 py-2">
-                        <Badge variant={report.is_running ? 'success' : 'error'}>
-                          {report.is_running ? 'YES' : 'NO'}
+                        <Badge variant={report.machine.is_running ? 'success' : 'error'}>
+                          {report.machine.is_running ? 'YES' : 'NO'}
                         </Badge>
                       </td>
                       <td className="px-3 py-2">
-                        <Badge variant={report.is_down ? 'error' : 'success'}>
-                          {report.is_down ? 'YES' : 'NO'}
+                        <Badge variant={report.machine.is_down ? 'error' : 'success'}>
+                          {report.machine.is_down ? 'YES' : 'NO'}
                         </Badge>
                       </td>
                       <td className="px-3 py-2">{report.queue_size}</td>

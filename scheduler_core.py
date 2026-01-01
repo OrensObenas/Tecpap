@@ -609,11 +609,18 @@ class SchedulerEngine:
     def _simulate_plan(self, queue: List[WorkOrder]) -> (List[WorkOrder], List[PlanRow]):
         """
         Simule un ordonnancement multi-machines (assignation + start/end).
-        - tri initial par (priority desc, due asc, of_id)
-        - tie-break: machine qui termine le plus tôt, puis setup le plus faible, puis machine_id
+        - Regroupement par format : ordre des formats choisi pour minimiser le setup moyen depuis l'état machines.
+        - À l'intérieur d'un format : tri par priorité décroissante, due_date croissante, puis id.
+        - Choix machine : fin la plus tôt, TRS le plus élevé, setup le plus faible, puis machine_id.
         """
-        remaining = list(queue or [])
-        remaining.sort(key=lambda wo: (-wo.priority, wo.due_date, wo.of_id))
+        # Groupes par format
+        buckets: Dict[str, List[WorkOrder]] = {}
+        for wo in queue or []:
+            buckets.setdefault(wo.format, []).append(wo)
+        for fmt in buckets:
+            buckets[fmt].sort(key=lambda w: (-w.priority, w.due_date, w.of_id))
+
+        formats = list(buckets.keys())
 
         machine_state = {
             mid: {
@@ -626,6 +633,29 @@ class SchedulerEngine:
 
         assigned: List[WorkOrder] = []
         rows: List[PlanRow] = []
+
+        def format_cost(fmt: str) -> tuple:
+            # coût minimal de setup depuis les formats courants de toutes les machines
+            costs = []
+            for st in machine_state.values():
+                costs.append(self.setup.get(st["current_format"], fmt))
+            min_setup = min(costs) if costs else 0
+            # tie-break: meilleur max priorité dans le bucket (négatif pour trier)
+            max_prio = -max((w.priority for w in buckets.get(fmt, [])), default=0)
+            return (min_setup, max_prio, fmt)
+
+        # Ordre des formats pour minimiser setup
+        ordered_formats: List[str] = []
+        remaining_formats = formats[:]
+        while remaining_formats:
+            best_fmt = min(remaining_formats, key=format_cost)
+            ordered_formats.append(best_fmt)
+            remaining_formats.remove(best_fmt)
+
+        # Flatten les OF dans l'ordre des formats choisis
+        remaining: List[WorkOrder] = []
+        for fmt in ordered_formats:
+            remaining.extend(buckets.get(fmt, []))
 
         for wo in remaining:
             best_mid = None
@@ -640,7 +670,9 @@ class SchedulerEngine:
                 work_min = int(round(work_min / speed))
                 end = start + timedelta(minutes=setup_min + work_min)
 
-                key = (end, setup_min, mid)
+                trs_here = self._trs_for(mid, wo.format)
+                # priorité TRS élevé, puis fin la plus tôt, puis setup, puis machine_id
+                key = (-trs_here, end, setup_min, mid)
                 if best_key is None or key < best_key:
                     best_key = key
                     best_mid = mid

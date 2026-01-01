@@ -22,7 +22,7 @@ export function Planning() {
     work_nominal_min: 60,
   });
 
-  const [strategy] = useState<'FORMAT_PRIORITY'>('FORMAT_PRIORITY');
+  const [strategy] = useState<'MULTI_MACHINE_TRS'>('MULTI_MACHINE_TRS');
 
   // polling disabled: manual reload only (évite de spammer ton backend)
   const woPoll = usePolling(() => api.getWorkOrders(200), {
@@ -125,7 +125,7 @@ export function Planning() {
                     disabled
                     className="border rounded px-3 py-2 bg-gray-100 text-gray-500"
                   >
-                    <option value="FORMAT_PRIORITY">Format → Priority (backend only)</option>
+                    <option value="MULTI_MACHINE_TRS">Multi-machine TRS (backend only)</option>
                   </select>
                 </div>
 
@@ -272,6 +272,8 @@ export function Planning() {
                   <tr>
                     <th className="px-3 py-2 text-left">OF ID</th>
                     <th className="px-3 py-2 text-left">Format</th>
+                    <th className="px-3 py-2 text-left">Machine</th>
+                    <th className="px-3 py-2 text-left">Due</th>
                     <th className="px-3 py-2 text-left">Start</th>
                     <th className="px-3 py-2 text-left">End</th>
                     <th className="px-3 py-2 text-left">Setup</th>
@@ -284,6 +286,8 @@ export function Planning() {
                     <tr key={idx} className="hover:bg-gray-50">
                       <td className="px-3 py-2 font-medium">{item.of_id}</td>
                       <td className="px-3 py-2">{item.format}</td>
+                      <td className="px-3 py-2">{item.machine_id || '-'}</td>
+                      <td className="px-3 py-2 whitespace-nowrap">{item.due_date ? formatDateTime(item.due_date) : '-'}</td>
                       <td className="px-3 py-2 whitespace-nowrap">{formatDateTime(item.start)}</td>
                       <td className="px-3 py-2 whitespace-nowrap">{formatDateTime(item.end)}</td>
                       <td className="px-3 py-2">{formatDuration(item.setup_min)}</td>

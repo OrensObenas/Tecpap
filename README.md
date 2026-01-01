@@ -18,6 +18,7 @@ Les données sont chargées depuis `tecpap_synth_data/` (fichiers `work_orders.c
 ## Données et modèle
 - `work_orders.csv` : colonnes attendues `of_id,created_at,due_date,priority,product,format,qty,nominal_rate_u_per_h,nominal_duration_min`. Sert à construire la file d’attente initiale.
 - `setup_matrix.csv` : colonnes `from_format,to_format,setup_min` pour les temps de changement de format.
+- `machine_history.csv` (nouveau) : colonnes `machine_id,format,trs_percent[,sample_count,avg_setup_min]` pour guider l’assignation multi-machines (fallback TRS=70% si couple manquant). Machines par défaut : 5 et 6.
 - Les replans utilisent la matrice de setup ; si aucune méthode de plan n’est fournie par le moteur, un preview est construit depuis la queue en séquence.
 - Politique retard d’événements : ignorés si reçus avec >120 min de retard ou si `late_policy="IGNORE"`.
 - Replan après panne uniquement si la durée d’arrêt estimée ≥ 30 min (seuil `breakdown_replan_threshold_min`).
@@ -26,7 +27,9 @@ Les données sont chargées depuis `tecpap_synth_data/` (fichiers `work_orders.c
 - `GET /state` : état courant du moteur (temps simulé, format courant, file, KPIs).
 - `GET /plan?limit=` : planning prévisionnel (méthode moteur si dispo, sinon preview depuis la queue).
 - `GET /plan/export.csv` : export CSV du planning.
-- `POST /plan/recompute` : re-tri de la queue avec `strategy="FORMAT_PRIORITY"` (groupe par format, trie par priorité décroissante puis due_date, ordre des formats pour minimiser setups).
+- `POST /plan/recompute` : replan multi-machines basé sur TRS (machines 5/6 par défaut), affecte chaque OF à la machine qui termine le plus tôt (setup + TRS) et renvoie l’assignation.
+- `GET /machines/history` : historique TRS par machine/format (extrait de `machine_history.csv`).
+- `GET /machines/state` : état courant des machines (format courant, disponibilité, flags run/down).
 - `GET /work-orders` : liste de la queue (id, format, due_date, priorité, durée nominale).
 - `POST /work-orders` : ajoute une OF (persiste dans `work_orders.csv` et pousse dans la queue/pool si présents).
   ```json

@@ -119,11 +119,39 @@ export interface EventLog {
 export interface PlanItem {
   of_id: string;
   format: string;
+  machine_id?: string;
+  due_date?: string;
   start: string;
   end: string;
   setup_min: number;
   work_nominal_min: number;
   note?: string;
+}
+
+export interface MachineHistory {
+  machine_id: string;
+  format: string;
+  trs_percent: number;
+  sample_count?: number | string | null;
+  avg_setup_min?: number | string | null;
+}
+
+export interface MachineState {
+  machine_id: string;
+  available_from?: string;
+  current_format?: string | null;
+  is_running: boolean;
+  is_down: boolean;
+  speed_factor: number;
+}
+
+export interface MachinesHistoryResponse {
+  items: MachineHistory[];
+}
+
+export interface MachinesStateResponse {
+  items: MachineState[];
+  now?: string;
 }
 
 // types (dans src/types/api.ts)

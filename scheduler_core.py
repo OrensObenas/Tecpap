@@ -23,6 +23,7 @@ class WorkOrder:
     qty: int
     nominal_rate_u_per_h: int
     nominal_duration_min: int  # nominal minutes at speed=1.0
+    machine_id: Optional[str] = None  # assigned machine when using multi-machine planning
 
 
 @dataclass
@@ -53,11 +54,13 @@ class SetupMatrix:
 class PlanRow:
     of_id: str
     format: str
+    due_date: datetime
     start: datetime
     end: datetime
     setup_min: int
     work_nominal_min: int
     note: str
+    machine_id: Optional[str] = None
 
 
 # =========================
@@ -86,6 +89,7 @@ def read_work_orders(path: Path) -> List[WorkOrder]:
                 qty=int(row["qty"]),
                 nominal_rate_u_per_h=int(row["nominal_rate_u_per_h"]),
                 nominal_duration_min=int(row["nominal_duration_min"]),
+                machine_id=row.get("machine_id") if "machine_id" in row else None,
             ))
     return out
 
@@ -98,6 +102,29 @@ def read_setup_matrix(path: Path) -> SetupMatrix:
             tf = row["to_format"]
             mat.setdefault(ff, {})[tf] = int(row["setup_min"])
     return SetupMatrix(mat)
+
+
+def read_machine_history(path: Path) -> Dict[str, Dict[str, float]]:
+    """
+    machine_history.csv : machine_id,format,trs_percent[,sample_count,avg_setup_min]
+    Retourne {machine_id: {format: trs_percent}}
+    """
+    hist: Dict[str, Dict[str, float]] = {}
+    if not path.exists():
+        return hist
+    with path.open("r", encoding="utf-8") as f:
+        r = csv.DictReader(f)
+        for row in r:
+            mid = (row.get("machine_id") or "").strip()
+            fmt = (row.get("format") or "").strip()
+            if not mid or not fmt:
+                continue
+            try:
+                trs = float(row.get("trs_percent") or row.get("trs") or 70.0)
+            except Exception:
+                trs = 70.0
+            hist.setdefault(mid, {})[fmt] = trs
+    return hist
 
 def parse_urgent_payload(payload: str, created_at: datetime) -> WorkOrder:
     kv: Dict[str, str] = {}
@@ -123,6 +150,7 @@ def parse_urgent_payload(payload: str, created_at: datetime) -> WorkOrder:
         qty=qty,
         nominal_rate_u_per_h=rate,
         nominal_duration_min=dur,
+        machine_id=None,
     )
 
 
@@ -136,9 +164,10 @@ class SchedulerEngine:
     - Breakdown events trigger replanning ONLY if downtime duration >= 30 min.
     """
 
-    def __init__(self, work_orders: List[WorkOrder], setup: SetupMatrix):
+    def __init__(self, work_orders: List[WorkOrder], setup: SetupMatrix, machine_history: Optional[Dict[str, Dict[str, float]]] = None):
         self._lock = threading.Lock()
         self.setup = setup
+        self.machine_history: Dict[str, Dict[str, float]] = machine_history or {}
 
         self._pool: List[WorkOrder] = list(work_orders)
 
@@ -180,6 +209,20 @@ class SchedulerEngine:
         self._idle_min: int = 0
         self._producing_min: int = 0
         self._completed: List[Dict[str, Any]] = []
+
+        # multi-machine state (simplifié : utilisé pour planification)
+        self._machine_ids: List[str] = self._init_machine_ids()
+        self.machines: Dict[str, Dict[str, Any]] = {
+            mid: {
+                "machine_id": mid,
+                "available_from": self.now,
+                "current_format": None,
+                "is_running": True,
+                "is_down": False,
+                "speed_factor": 1.0,
+            }
+            for mid in self._machine_ids
+        }
 
         self._refresh_queue_from_pool()
 
@@ -369,6 +412,9 @@ class SchedulerEngine:
         self._pool = remaining_pool
         self.queue.extend(newly_added)
         self.queue.sort(key=lambda x: (x.due_date, -x.priority))
+        for wo in self.queue:
+            # reset any stale machine assignment (recalculé au replan)
+            wo.machine_id = getattr(wo, "machine_id", None)
 
     def _advance_to(self, target: datetime):
         if target <= self.now:
@@ -491,7 +537,7 @@ class SchedulerEngine:
     # ---------- Replanning ----------
     def _maybe_replan(self, reason: str) -> bool:
         before = self._kpi_total_lateness(self.queue)
-        candidate = self._replan_queue(self.queue)
+        candidate = self._replan_queue_multi(self.queue)
         after = self._kpi_total_lateness(candidate)
 
         changed = [w.of_id for w in candidate] != [w.of_id for w in self.queue]
@@ -513,50 +559,119 @@ class SchedulerEngine:
         return False
 
     def _kpi_total_lateness(self, queue: List[WorkOrder]) -> int:
-        sim_now = self.now
-        sim_fmt = self.current_format
-        sim_speed = self.speed_factor
-
+        """
+        Estime le retard total sur un plan multi-machines simulé.
+        """
+        _, plan_rows = self._simulate_plan(queue)
         total_late = 0
-        for wo in queue:
-            setup_min = self.setup.get(sim_fmt, wo.format)
-            real_work_min = int(wo.nominal_duration_min / max(sim_speed, 1e-6))
-            finish = sim_now + timedelta(minutes=setup_min + real_work_min)
-            late = max(0, int((finish - wo.due_date).total_seconds() // 60))
+        for row in plan_rows:
+            late = max(0, int((row.end - row.due_date).total_seconds() // 60))
             total_late += late
-            sim_now = finish
-            sim_fmt = wo.format
         return total_late
 
-    def _replan_queue(self, queue: List[WorkOrder]) -> List[WorkOrder]:
-        remaining = queue[:]
-        new_q: List[WorkOrder] = []
-        sim_now = self.now
-        sim_fmt = self.current_format
+    def _replan_queue_multi(self, queue: List[WorkOrder]) -> List[WorkOrder]:
+        """
+        Replan multi-machines : assigne chaque OF à la machine qui termine le plus tôt
+        en tenant compte du setup et du TRS historique.
+        Retourne la queue ordonnée par start time simulé.
+        """
+        assigned_wos, _ = self._simulate_plan(queue)
+        assigned_wos.sort(key=lambda wo: getattr(wo, "_plan_start", self.now))
+        for wo in assigned_wos:
+            if hasattr(wo, "_plan_start"):
+                delattr(wo, "_plan_start")
+            if hasattr(wo, "_plan_end"):
+                delattr(wo, "_plan_end")
+        return assigned_wos
 
-        while remaining:
-            best = min(remaining, key=lambda wo: self._score(sim_now, sim_fmt, wo))
-            remaining.remove(best)
-            new_q.append(best)
+    def _init_machine_ids(self) -> List[str]:
+        """
+        Utilise les IDs présents dans l'historique TRS, sinon fallback machines 5 et 6.
+        """
+        if self.machine_history:
+            return sorted(self.machine_history.keys())
+        return ["5", "6"]
 
-            setup_min = self.setup.get(sim_fmt, best.format)
-            real_work_min = int(best.nominal_duration_min / max(self.speed_factor, 1e-6))
-            sim_now = sim_now + timedelta(minutes=setup_min + real_work_min)
-            sim_fmt = best.format
+    def _trs_for(self, machine_id: str, fmt: str) -> float:
+        """
+        Renvoie le TRS pour une machine et un format. Fallback 70% si inconnu.
+        """
+        try:
+            return float(self.machine_history.get(machine_id, {}).get(fmt, 70.0))
+        except Exception:
+            return 70.0
 
-        return new_q
+    def _effective_duration_min(self, wo: WorkOrder, machine_id: str) -> int:
+        trs = self._trs_for(machine_id, wo.format)
+        eff = wo.nominal_duration_min / max(trs / 100.0, 0.1)
+        return int(round(eff))
 
-    def _score(self, now: datetime, current_format: Optional[str], wo: WorkOrder) -> float:
-        setup_min = self.setup.get(current_format, wo.format)
-        real_work_min = int(wo.nominal_duration_min / max(self.speed_factor, 1e-6))
-        finish = now + timedelta(minutes=setup_min + real_work_min)
-        late_min = max(0, int((finish - wo.due_date).total_seconds() // 60))
+    def _simulate_plan(self, queue: List[WorkOrder]) -> (List[WorkOrder], List[PlanRow]):
+        """
+        Simule un ordonnancement multi-machines (assignation + start/end).
+        - tri initial par (priority desc, due asc, of_id)
+        - tie-break: machine qui termine le plus tôt, puis setup le plus faible, puis machine_id
+        """
+        remaining = list(queue or [])
+        remaining.sort(key=lambda wo: (-wo.priority, wo.due_date, wo.of_id))
 
-        W_LATE = 2.5
-        W_SETUP = 0.8
-        W_PRIO = 20.0
+        machine_state = {
+            mid: {
+                "available_from": max(self.now, self.machines.get(mid, {}).get("available_from", self.now)),
+                "current_format": self.machines.get(mid, {}).get("current_format"),
+                "speed_factor": self.machines.get(mid, {}).get("speed_factor", 1.0),
+            }
+            for mid in self._machine_ids
+        }
 
-        return (W_LATE * late_min) + (W_SETUP * setup_min) - (W_PRIO * wo.priority)
+        assigned: List[WorkOrder] = []
+        rows: List[PlanRow] = []
+
+        for wo in remaining:
+            best_mid = None
+            best_key = None
+            best_times = None
+
+            for mid, st in machine_state.items():
+                setup_min = self.setup.get(st["current_format"], wo.format)
+                start = st["available_from"]
+                work_min = self._effective_duration_min(wo, mid)
+                speed = max(st.get("speed_factor", 1.0), 1e-6)
+                work_min = int(round(work_min / speed))
+                end = start + timedelta(minutes=setup_min + work_min)
+
+                key = (end, setup_min, mid)
+                if best_key is None or key < best_key:
+                    best_key = key
+                    best_mid = mid
+                    best_times = (start, end, setup_min, work_min)
+
+            if best_mid is None or best_times is None:
+                continue
+
+            start, end, setup_min, work_min = best_times
+            machine_state[best_mid]["available_from"] = end
+            machine_state[best_mid]["current_format"] = wo.format
+
+            wo_copy = copy.copy(wo)
+            wo_copy.machine_id = best_mid
+            setattr(wo_copy, "_plan_start", start)
+            setattr(wo_copy, "_plan_end", end)
+
+            assigned.append(wo_copy)
+            rows.append(PlanRow(
+                of_id=wo_copy.of_id,
+                format=wo_copy.format,
+                due_date=wo_copy.due_date,
+                start=start,
+                end=end,
+                setup_min=setup_min,
+                work_nominal_min=work_min,
+                note="plan_multi_machines",
+                machine_id=best_mid,
+            ))
+
+        return assigned, rows
 
     # ---------- Day simulation ----------
     def simulate_day(self,
@@ -650,13 +765,23 @@ class SchedulerEngine:
         with self._lock:
             return self._hourly_report_snapshot()
 
+    def get_plan_preview(self, limit: int = 30) -> List[PlanRow]:
+        """
+        Plan prévisionnel multi-machines (utilisé par l'API /plan).
+        """
+        with self._lock:
+            q = list(self.queue[:limit])
+            _, rows = self._simulate_plan(q)
+            return rows[:limit]
+
 
 
 def load_engine_from_dir(data_dir: str) -> SchedulerEngine:
     d = Path(data_dir)
     orders = read_work_orders(d / "work_orders.csv")
     setup = read_setup_matrix(d / "setup_matrix.csv")
-    engine = SchedulerEngine(orders, setup)
+    machine_history = read_machine_history(d / "machine_history.csv")
+    engine = SchedulerEngine(orders, setup, machine_history=machine_history)
     t0 = min((o.created_at for o in orders), default=datetime.now())
     engine.set_time(t0)
     return engine

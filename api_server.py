@@ -58,6 +58,7 @@ RUNNER = RealTimeRunner(ENGINE)
 
 WORK_ORDERS_CSV = Path(DATA_DIR) / "work_orders.csv"
 SETUP_MATRIX_CSV = Path(DATA_DIR) / "setup_matrix.csv"
+MACHINE_HISTORY_CSV = Path(DATA_DIR) / "machine_history.csv"
 
 
 def parse_iso(ts: str) -> datetime:
@@ -158,6 +159,8 @@ class PlanRowOut(BaseModel):
     setup_min: int
     work_nominal_min: int
     note: str
+    machine_id: Optional[str] = ""
+    due_date: Optional[str] = ""
 
 
 class SimIncomingEventIn(BaseModel):
@@ -348,82 +351,6 @@ def get_state():
     return ENGINE.get_state()
 
 
-""" # -----------------------
-# Planning endpoints
-# -----------------------
-
-@app.get("/plan", response_model=List[PlanRowOut])
-def get_plan(limit: int = 30):
-    try:
-        rows = safe_get_plan_rows(limit=limit)
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"/plan failed: {type(e).__name__}: {e}. See /debug/plan-error for traceback."
-        )
-
-    def to_iso_minutes(dt):
-        try:
-            return dt.isoformat(timespec="minutes") if dt else ""
-        except Exception:
-            return ""
-
-    out: List[PlanRowOut] = []
-    for r in rows:
-        start = getattr(r, "start", None)
-        end = getattr(r, "end", None)
-        out.append(
-            PlanRowOut(
-                of_id=str(getattr(r, "of_id", "")),
-                format=str(getattr(r, "format", "")),
-                start=to_iso_minutes(start),
-                end=to_iso_minutes(end),
-                setup_min=int(getattr(r, "setup_min", 0) or 0),
-                work_nominal_min=int(getattr(r, "work_nominal_min", 0) or 0),
-                note=str(getattr(r, "note", "")),
-            )
-        )
-    return out
-
-
-@app.get("/plan/export.csv")
-def export_plan_csv(limit: int = 200):
-    rows = safe_get_plan_rows(limit=limit)
-
-    def to_s(x) -> str:
-        return "" if x is None else str(x)
-
-    def esc(x) -> str:
-        s = to_s(x)
-        if "," in s or '"' in s or "\n" in s:
-            return '"' + s.replace('"', '""') + '"'
-        return s
-
-    def to_iso_minutes(dt):
-        try:
-            return dt.isoformat(timespec="minutes") if dt else ""
-        except Exception:
-            return ""
-
-    lines = ["of_id,format,start,end,setup_min,work_nominal_min,note"]
-
-    for r in rows:
-        start = getattr(r, "start", None)
-        end = getattr(r, "end", None)
-
-        lines.append(",".join([
-            esc(getattr(r, "of_id", "")),
-            esc(getattr(r, "format", "")),
-            esc(to_iso_minutes(start)),
-            esc(to_iso_minutes(end)),
-            esc(getattr(r, "setup_min", 0)),
-            esc(getattr(r, "work_nominal_min", 0)),
-            esc(getattr(r, "note", "")),
-        ]))
-
-    return Response(content="\n".join(lines), media_type="text/csv")
- """
-
 # -----------------------
 # Events endpoints
 # -----------------------
@@ -572,6 +499,34 @@ def _get_setup_minutes(setup_map, prev_fmt: str | None, next_fmt: str | None) ->
     if prev_fmt == next_fmt:
         return 0
     return int(setup_map.get((prev_fmt, next_fmt), setup_map.get((prev_fmt, prev_fmt), 0) or 0))
+
+
+def _read_machine_history_rows() -> list[dict]:
+    """
+    Lit machine_history.csv pour exposer l'historique TRS.
+    """
+    rows: list[dict] = []
+    if not MACHINE_HISTORY_CSV.exists():
+        return rows
+    with MACHINE_HISTORY_CSV.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            mid = (r.get("machine_id") or "").strip()
+            fmt = (r.get("format") or "").strip()
+            if not mid or not fmt:
+                continue
+            try:
+                trs = float(r.get("trs_percent") or r.get("trs") or 70.0)
+            except Exception:
+                trs = 70.0
+            rows.append({
+                "machine_id": mid,
+                "format": fmt,
+                "trs_percent": trs,
+                "sample_count": r.get("sample_count"),
+                "avg_setup_min": r.get("avg_setup_min"),
+            })
+    return rows
 
 def _get_now_dt() -> datetime:
     st = ENGINE.get_state()
@@ -893,6 +848,8 @@ def get_plan(limit: int = 30):
                 setup_min=int(getv(r, "setup_min", 0) or 0),
                 work_nominal_min=int(getv(r, "work_nominal_min", 0) or 0),
                 note=str(getv(r, "note", "")),
+                machine_id=str(getv(r, "machine_id", "") or ""),
+                due_date=to_iso_minutes(getv(r, "due_date", None)),
             )
         )
     return out
@@ -923,12 +880,14 @@ def export_plan_csv(limit: int = 200):
             return '"' + s.replace('"', '""') + '"'
         return s
 
-    lines = ["of_id,format,start,end,setup_min,work_nominal_min,note"]
+    lines = ["of_id,format,machine_id,due_date,start,end,setup_min,work_nominal_min,note"]
 
     for r in rows:
         lines.append(",".join([
             esc(getv(r, "of_id", "")),
             esc(getv(r, "format", "")),
+            esc(getv(r, "machine_id", "")),
+            esc(to_iso_minutes(getv(r, "due_date", None))),
             esc(to_iso_minutes(getv(r, "start", None))),
             esc(to_iso_minutes(getv(r, "end", None))),
             esc(getv(r, "setup_min", 0)),
@@ -938,13 +897,35 @@ def export_plan_csv(limit: int = 200):
 
     return Response(content="\n".join(lines), media_type="text/csv")
 
+@app.get("/machines/history")
+def get_machine_history():
+    """
+    Expose l'historique TRS par machine/format.
+    """
+    return {"items": _read_machine_history_rows()}
+
+
+@app.get("/machines/state")
+def get_machines_state():
+    """
+    Etat courant des machines (format courant, dispo).
+    """
+    machines = getattr(ENGINE, "machines", {}) or {}
+    out = []
+    for mid, st in machines.items():
+        out.append({
+            "machine_id": mid,
+            "available_from": getattr(st.get("available_from"), "isoformat", lambda **k: None)(timespec="minutes") if isinstance(st, dict) else "",
+            "current_format": st.get("current_format") if isinstance(st, dict) else None,
+            "is_running": st.get("is_running", True) if isinstance(st, dict) else True,
+            "is_down": st.get("is_down", False) if isinstance(st, dict) else False,
+            "speed_factor": st.get("speed_factor", 1.0) if isinstance(st, dict) else 1.0,
+        })
+    return {"items": out, "now": ENGINE.get_state().get("now")}
+
 from fastapi import Body
 from datetime import datetime
 from typing import Optional
-
-class ReplanRequest(BaseModel):
-    now: Optional[str] = None
-    strategy: str = "EDD_SETUP"  # Earliest Due Date + setup tie-break
 
 import os
 
@@ -959,121 +940,49 @@ from datetime import datetime
 # ... ReplanRequest ...
 class ReplanRequest(BaseModel):
     now: Optional[str] = None
-    strategy: str = "FORMAT_PRIORITY"  # new default
+    strategy: str = "MULTI_MACHINE_TRS"  # stratégie unique
 
 @app.post("/plan/recompute")
 def recompute_plan(req: ReplanRequest = Body(default=ReplanRequest())):
-    st = ENGINE.get_state()
-    prev_fmt = st.get("current_format") or None
+    if req.now:
+        ENGINE.set_time(parse_iso(req.now))
 
     q = list(getattr(ENGINE, "queue", []) or [])
     if not q:
         return {"ok": True, "changed": False, "reason": "empty_queue"}
 
-    setup_map = _read_setup_matrix()
-
-    def due_dt(wo):
-        d = getattr(wo, "due_date", None)
-        if not d:
-            return datetime.max
-        if isinstance(d, str):
-            try:
-                return datetime.fromisoformat(d)
-            except:
-                return datetime.max
-        return d
-
-    def prio(wo):
-        try:
-            return int(getattr(wo, "priority", 0) or 0)
-        except:
-            return 0
-
-    def setup_from(a, b):
-        if not a or not b:
-            return 0
-        try:
-            return int(_get_setup_minutes(setup_map, a, b) or 0)
-        except:
-            return 0
+    if not hasattr(ENGINE, "_replan_queue_multi"):
+        raise HTTPException(status_code=500, detail="Engine does not support multi-machine replan")
 
     before = [getattr(x, "of_id", "") for x in q]
+    candidate = ENGINE._replan_queue_multi(q)
+    ENGINE.queue = candidate
 
-    strategy = (req.strategy or "").upper()
+    # calcul preview pour debug / front
+    _, plan_rows = ENGINE._simulate_plan(candidate)
+    total_setup = sum(getattr(r, "setup_min", 0) or 0 for r in plan_rows)
 
-    # --------------------------
-    # NEW: FORMAT -> PRIORITY
-    # --------------------------
-    if strategy == "FORMAT_PRIORITY":
-        buckets = defaultdict(list)
-        for wo in q:
-            fmt = getattr(wo, "format", "") or ""
-            buckets[fmt].append(wo)
-
-        # sort within each format: priority desc, then due_date asc, then stable id
-        for fmt in buckets:
-            buckets[fmt].sort(
-                key=lambda wo: (
-                    -prio(wo),
-                    due_dt(wo),
-                    getattr(wo, "of_id", "")
-                )
-            )
-
-        formats = list(buckets.keys())
-
-        # choose order of formats to minimize setup (greedy chain)
-        # start from current_format if exists, else from the format of the first job
-        cur = prev_fmt or (getattr(q[0], "format", "") or "")
-
-        remaining = formats[:]
-        ordered_formats = []
-
-        # if current format is not present in remaining, we still use it as "start state"
-        while remaining:
-            best_f = None
-            best_cost = None
-            for f in remaining:
-                cost = setup_from(cur, f)
-                # tie-break: prefer the format that has the highest max priority inside (to serve urgents sooner)
-                tie = -max((prio(x) for x in buckets[f]), default=0)
-                key = (cost, tie, f)
-                if best_cost is None or key < best_cost:
-                    best_cost = key
-                    best_f = f
-
-            ordered_formats.append(best_f)
-            remaining.remove(best_f)
-            cur = best_f
-
-        # flatten
-        ordered = []
-        for f in ordered_formats:
-            ordered.extend(buckets[f])
-
-    else:
-        # fallback to your existing strategies, or error
-        raise HTTPException(status_code=400, detail="Unknown strategy. Use FORMAT_PRIORITY.")
-
-    after = [getattr(x, "of_id", "") for x in ordered]
-    ENGINE.queue = ordered
+    after = [getattr(x, "of_id", "") for x in candidate]
     changed = before != after
 
-    # useful debug (optional)
-    total_setup = 0
-    cur2 = prev_fmt
-    for wo in ordered:
-        f = getattr(wo, "format", "") or ""
-        total_setup += setup_from(cur2, f)
-        cur2 = f
+    assignments = [
+        {
+            "of_id": getattr(r, "of_id", ""),
+            "machine_id": getattr(r, "machine_id", ""),
+            "start": getattr(getattr(r, "start", None), "isoformat", lambda **k: None)(timespec="minutes") if getattr(r, "start", None) else None,
+            "end": getattr(getattr(r, "end", None), "isoformat", lambda **k: None)(timespec="minutes") if getattr(r, "end", None) else None,
+        }
+        for r in plan_rows
+    ]
 
     return {
         "ok": True,
         "changed": changed,
-        "strategy": strategy,
+        "strategy": "MULTI_MACHINE_TRS",
         "total_setup_min_est": total_setup,
         "before": before[:30],
         "after": after[:30],
+        "assignments": assignments[:50],
     }
 
 @app.get("/debug/setup")

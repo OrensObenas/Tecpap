@@ -1,26 +1,18 @@
-# To-do Frontend (Tecpap_data-main) vs backend FastAPI
+# To-do multi-machines (backend + frontend)
 
-1) Types/DTO à aligner (`src/types/api.ts`)
-- `EventType`: remplacer `URGENT_JOB` par `URGENT_ORDER` (nom réel côté backend).
-- `HourlyReport`: le backend renvoie `{time, machine:{is_running,is_down,speed_factor,current_format,current_job_id}, queue_size, completed_count, total_lateness_min_est, counters_min:{downtime,stopped,idle,producing}}`. Ajuster l’interface (actuelle: champs plats is_running, is_down, …) et adapter l’usage dans `Reports.tsx`.
-- `EngineState.breakdown`: le backend expose `{down_start_time, down_reason, last_breakdown_duration_min, replan_threshold_min}` (actuel: `type, started_at, duration_min`). Mettre le bon shape ou mapper dans `api.ts`.
-- `RecomputePlanResponse`: inclure `total_setup_min_est` (et retirer `pid` si inutile) pour refléter `/plan/recompute`.
+## Backend (FastAPI) — FAIT
+- Moteur multi-machines (machines 5 et 6 par défaut) avec TRS par format (`machine_history.csv`), assignation au meilleur TRS/fin la plus tôt, recalcul lateness.
+- `/plan` + export incluent `machine_id` et `due_date`; `/plan/recompute` utilise la stratégie `MULTI_MACHINE_TRS` et retourne les assignations.
+- Endpoints machines : `GET /machines/history` (lecture `machine_history.csv`), `GET /machines/state`.
+- README mis à jour (CSV TRS, règle d’assignation, replan multi-machines).
 
-2) API layer (`src/services/api.ts`)
-- (fait) Le front lit désormais la structure native `machine.{is_running,...}` donc pas de mapping nécessaire pour `HourlyReport`.
-- (fait) `recomputePlan` force `FORMAT_PRIORITY` pour éviter les 400.
-- (fait) Ajout d’un helper `buildUrgentOrderValue` et type `UrgentOrderPayload` pour construire le payload `URGENT_ORDER` (`of_id=...;due=...;format=...;qty=...;nominal_rate=...;duration_min=...;priority=...`).
+## Frontend (Tecpap_data-main)
+- Types (`src/types/api.ts`) : ajouter `machine_id?: string` à `PlanItem`; ajouter `MachineHistory` (machine_id, format, trs_percent, sample_count?, avg_setup_min?); type `MachineState` si endpoint exposé.
+- Services (`src/services/api.ts`) : propager `machine_id` dans `getPlan`; ajouter `getMachineHistory()` (et `getMachinesState()` si dispo).
+- Planning (`src/pages/Planning.tsx`) : afficher une colonne “Machine” dans le tableau de planification et dans l’export/CSV; optionnel filtre par machine.
+- Nouvelle page `src/pages/MachinesHistory.tsx` : tableau des TRS par machine/format, résumés par machine (TRS moyen, meilleur/pire format), filtres machine/format, style cohérent (Card/Badge/Button).
+- `src/App.tsx` : ajouter un onglet/menu “Machines” pointant vers la page MachinesHistory.
 
-3) Pages à adapter
-- (fait) `Reports.tsx` lit `report.machine.is_running/is_down`.
-- (fait) `EventsLogs.tsx` dropdown sur `URGENT_ORDER` + hint sur le format de value.
-- (fait) `Planning.tsx` verrouille la stratégie sur `FORMAT_PRIORITY` (dropdown désactivé).
-- (fait) `Planning.tsx`: conversion due_date -> ISO avant POST.
-- (fait) `DashboardLive.tsx`: affiche breakdown et bouton de test URGENT_ORDER.
-
-4) Base URL / CORS
-- Vérifier `VITE_API_BASE_URL` (par défaut `http://127.0.0.1:8000`) cohérent avec le backend; CORS backend autorise 5173 et 3000.
-
-5) Données OF / Plan
-- Le backend renvoie `work_nominal_min` dans `/work-orders`; si absent il peut calculer par défaut. Garder l’affichage mais prévoir `undefined` (fallback “N/A”).
-- Export CSV: l’URL `/plan/export.csv?limit=` est déjà correcte; rien à changer.
+## Vérifs manuelles
+- Créer OF F1/F2 avec TRS M5>M6 sur F1 et M6>M5 sur F2, vérifier `/plan` assigne la meilleure machine et ajuste les durées.
+- Envoyer un `URGENT_ORDER` et vérifier le réordonnancement/affectation multi-machines.

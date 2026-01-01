@@ -13,6 +13,8 @@ import type {
   EngineState,
   WorkOrder,
   CreateWorkOrderRequest,
+  MachinesHistoryResponse,
+  MachinesStateResponse,
 } from '../types/api';
 
 const API_BASE_URL =
@@ -91,6 +93,12 @@ export type RecomputePlanResponse = {
   before: string[];
   after: string[];
   total_setup_min_est?: number;
+  assignments?: {
+    of_id: string;
+    machine_id?: string;
+    start?: string | null;
+    end?: string | null;
+  }[];
 };
 
 export type UrgentOrderPayload = {
@@ -193,9 +201,9 @@ export const api = {
   },
 
   async recomputePlan(strategy?: string): Promise<RecomputePlanResponse> {
-    // backend n'accepte que FORMAT_PRIORITY (sinon 400)
-    const selected = (strategy || 'FORMAT_PRIORITY').toUpperCase();
-    const safeStrategy = selected === 'FORMAT_PRIORITY' ? selected : 'FORMAT_PRIORITY';
+    // backend n'accepte que MULTI_MACHINE_TRS
+    const selected = (strategy || 'MULTI_MACHINE_TRS').toUpperCase();
+    const safeStrategy = selected === 'MULTI_MACHINE_TRS' ? selected : 'MULTI_MACHINE_TRS';
     const qs = `?strategy=${encodeURIComponent(safeStrategy)}`;
     return fetchAPI<RecomputePlanResponse>(`/plan/recompute${qs}`, {
       method: 'POST',
@@ -204,5 +212,16 @@ export const api = {
 
   getPlanExportURL(limit = 200): string {
     return `${API_BASE_URL}/plan/export.csv?limit=${limit}`;
+  },
+
+  // -----------------------
+  // Machines
+  // -----------------------
+  async getMachineHistory(): Promise<MachinesHistoryResponse> {
+    return fetchAPI<MachinesHistoryResponse>('/machines/history');
+  },
+
+  async getMachinesState(): Promise<MachinesStateResponse> {
+    return fetchAPI<MachinesStateResponse>('/machines/state');
   },
 };

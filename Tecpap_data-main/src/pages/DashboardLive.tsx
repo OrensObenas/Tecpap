@@ -42,6 +42,12 @@ export function DashboardLive() {
     refetch: refetchRealtime,
   } = usePolling(fetchRealtime, { intervalMs: 1000, enabled: true });
 
+  // plan (pour voir machine/OF)
+  const planPoll = usePolling(() => api.getPlan(50), {
+    intervalMs: 15000,
+    enabled: true,
+  });
+
   const isRunning = realtimeState?.runner?.running || false;
   const engine = realtimeState?.engine;
 
@@ -434,6 +440,51 @@ export function DashboardLive() {
                     </div>
                   </div>
                 </div>
+              </div>
+            )}
+          </Card>
+
+          <Card title="Plan (machine par OF)">
+            {planPoll.loading && !planPoll.data ? (
+              <LoadingSpinner size="lg" />
+            ) : planPoll.error ? (
+              <ErrorMessage error={planPoll.error} onRetry={planPoll.refetch} />
+            ) : planPoll.data && planPoll.data.length > 0 ? (
+              <div className="overflow-x-auto">
+                <div className="flex justify-between items-center mb-3">
+                  <div className="text-sm text-gray-600">
+                    Auto-refresh 15s — dernières affectations machine/OF
+                  </div>
+                  <Button size="sm" variant="secondary" onClick={planPoll.refetch} disabled={planPoll.loading}>
+                    Reload plan
+                  </Button>
+                </div>
+                <table className="min-w-full text-sm">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-3 py-2 text-left">OF ID</th>
+                      <th className="px-3 py-2 text-left">Format</th>
+                      <th className="px-3 py-2 text-left">Machine</th>
+                      <th className="px-3 py-2 text-left">Start</th>
+                      <th className="px-3 py-2 text-left">End</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y">
+                    {planPoll.data.map((row, idx) => (
+                      <tr key={idx} className="hover:bg-gray-50">
+                        <td className="px-3 py-2 font-medium">{row.of_id}</td>
+                        <td className="px-3 py-2">{row.format}</td>
+                        <td className="px-3 py-2">{row.machine_id || '-'}</td>
+                        <td className="px-3 py-2 whitespace-nowrap">{formatDateTime(row.start)}</td>
+                        <td className="px-3 py-2 whitespace-nowrap">{formatDateTime(row.end)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="text-center text-gray-500 py-6">
+                Pas de plan disponible.
               </div>
             )}
           </Card>

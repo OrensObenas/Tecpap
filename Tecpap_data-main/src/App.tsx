@@ -1,11 +1,12 @@
 import { useState } from 'react';
-import { Activity, FileText, BarChart3, Calendar } from 'lucide-react';
+import { Activity, FileText, BarChart3, Calendar, Factory } from 'lucide-react';
 import { DashboardLive } from './pages/DashboardLive';
 import { EventsLogs } from './pages/EventsLogs';
 import { Reports } from './pages/Reports';
 import { Planning } from './pages/Planning';
+import { MachinesHistory } from './pages/MachinesHistory';
 
-type Page = 'dashboard' | 'events' | 'reports' | 'planning';
+type Page = 'dashboard' | 'events' | 'reports' | 'planning' | 'machines';
 
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard');
@@ -15,6 +16,7 @@ function App() {
     { id: 'events' as Page, name: 'Events & Logs', icon: FileText },
     { id: 'reports' as Page, name: 'Reports', icon: BarChart3 },
     { id: 'planning' as Page, name: 'Planning', icon: Calendar },
+    { id: 'machines' as Page, name: 'Machines', icon: Factory },
   ];
 
   return (
@@ -79,6 +81,7 @@ function App() {
         {currentPage === 'events' && <EventsLogs />}
         {currentPage === 'reports' && <Reports />}
         {currentPage === 'planning' && <Planning />}
+        {currentPage === 'machines' && <MachinesHistory />}
       </main>
 
       <footer className="bg-white border-t mt-12">

@@ -588,9 +588,11 @@ class SchedulerEngine:
         """
         Utilise les IDs présents dans l'historique TRS, sinon fallback machines 5 et 6.
         """
+        defaults = [str(i) for i in range(1, 7)]
         if self.machine_history:
-            return sorted(self.machine_history.keys())
-        return ["5", "6"]
+            ids = set(self.machine_history.keys()) | set(defaults)
+            return sorted(ids)
+        return defaults
 
     def _trs_for(self, machine_id: str, fmt: str) -> float:
         """
@@ -671,8 +673,8 @@ class SchedulerEngine:
                 end = start + timedelta(minutes=setup_min + work_min)
 
                 trs_here = self._trs_for(mid, wo.format)
-                # priorité TRS élevé, puis fin la plus tôt, puis setup, puis machine_id
-                key = (-trs_here, end, setup_min, mid)
+                # clé: fin la plus tôt, setup le plus faible, puis TRS élevé, puis machine_id
+                key = (end, setup_min, -trs_here, mid)
                 if best_key is None or key < best_key:
                     best_key = key
                     best_mid = mid
